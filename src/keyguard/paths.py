@@ -16,6 +16,10 @@ def database_path() -> Path:
     return data_dir() / "keyguard.db"
 
 
+def auth_token_path() -> Path:
+    return data_dir() / "api-token"
+
+
 def systemd_user_dir() -> Path:
     return (
         Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))

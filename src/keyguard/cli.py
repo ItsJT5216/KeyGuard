@@ -8,12 +8,13 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
-from pathlib import Path
 
 from .api import create_server
-from .paths import applications_dir, database_path, systemd_user_dir
+from .auth import load_or_create_token
+from .paths import applications_dir, auth_token_path, database_path, systemd_user_dir
 from .store import Store
 from .vault import KeyringVault
 
@@ -32,7 +33,7 @@ def serve() -> None:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
     store = Store(database_path(), KeyringVault())
-    server = create_server(store, _port())
+    server = create_server(store, load_or_create_token(auth_token_path()), _port())
     logging.getLogger("keyguard").info(
         "KeyGuard listening on 127.0.0.1:%s", server.server_port
     )
@@ -45,11 +46,14 @@ def serve() -> None:
         store.close()
 
 
-def _wait_for_daemon(port: int) -> None:
+def _wait_for_daemon(port: int, token: str) -> None:
     url = f"http://127.0.0.1:{port}/api/status"
     for _ in range(40):
         try:
-            with urllib.request.urlopen(url, timeout=0.5) as response:
+            request = urllib.request.Request(
+                url, headers={"Authorization": f"Bearer {token}"}
+            )
+            with urllib.request.urlopen(request, timeout=0.5) as response:  # noqa: S310
                 if response.status == 200:
                     return
         except (OSError, urllib.error.URLError):
@@ -66,15 +70,30 @@ def _systemctl() -> str:
 
 def open_dashboard() -> None:
     port = _port()
+    token = load_or_create_token(auth_token_path())
     subprocess.run(  # noqa: S603 - systemctl is resolved to an absolute path
         [_systemctl(), "--user", "start", "keyguard.service"], check=True
     )
-    _wait_for_daemon(port)
-    webbrowser.open(f"http://127.0.0.1:{port}/", new=2)
+    _wait_for_daemon(port, token)
+    fragment = urllib.parse.quote(token, safe="")
+    webbrowser.open(f"http://127.0.0.1:{port}/#token={fragment}", new=2)
+
+
+def _systemd_quote(path: str) -> str:
+    escaped = path.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = escaped.replace("%", "%%").replace("$", "$$")
+    return f'"{escaped}"'
+
+
+def _desktop_quote(path: str) -> str:
+    escaped = path.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = escaped.replace("%", "%%").replace("$", "\\$")
+    return f'"{escaped}"'
 
 
 def install() -> None:
-    python = Path(sys.executable).resolve()
+    python = os.path.abspath(sys.executable)
+    load_or_create_token(auth_token_path())
     service_dir = systemd_user_dir()
     app_dir = applications_dir()
     service_dir.mkdir(parents=True, exist_ok=True)
@@ -87,7 +106,7 @@ Wants=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart={python} -m keyguard.cli serve
+ExecStart={_systemd_quote(python)} -m keyguard.cli serve
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -101,7 +120,7 @@ WantedBy=default.target
 Type=Application
 Name=KeyGuard
 Comment=Open the KeyGuard API credit dashboard
-Exec={python} -m keyguard.cli open
+Exec={_desktop_quote(python)} -m keyguard.cli open
 Terminal=false
 Categories=Utility;Security;
 StartupNotify=true
@@ -117,7 +136,10 @@ StartupNotify=true
         [systemctl, "--user", "daemon-reload"], check=True
     )
     subprocess.run(  # noqa: S603 - systemctl is resolved to an absolute path
-        [systemctl, "--user", "enable", "--now", "keyguard.service"], check=True
+        [systemctl, "--user", "enable", "keyguard.service"], check=True
+    )
+    subprocess.run(  # noqa: S603 - systemctl is resolved to an absolute path
+        [systemctl, "--user", "restart", "keyguard.service"], check=True
     )
     print(f"Installed {service_path}")
     print(f"Installed {desktop_path}")

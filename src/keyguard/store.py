@@ -107,109 +107,115 @@ class Store:
     ) -> dict[str, Any]:
         credential_id = str(uuid.uuid4())
         now = utc_now()
-        masked = f"••••{secret[-4:]}" if len(secret) >= 4 else "••••"
-        self.vault.set(credential_id, secret)
-        try:
-            with self._lock, self._db:
-                self._db.execute(
-                    """
-                    INSERT INTO credentials
-                    (id, provider, name, masked_identifier, auto_protect, threshold, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        credential_id,
-                        provider,
-                        name,
-                        masked,
-                        int(auto_protect),
-                        threshold,
-                        now,
-                        now,
-                    ),
-                )
-                self._record_event_locked(
-                    credential_id, "credential_added", "success", {}
-                )
-        except Exception:
-            self.vault.delete(credential_id)
-            raise
-        created = self.get_credential(credential_id)
-        if created is None:
+        masked = f"••••{secret[-4:]}" if len(secret) > 4 else "••••"
+        with self._lock:
+            self.vault.set(credential_id, secret)
+            try:
+                with self._db:
+                    self._db.execute(
+                        """
+                        INSERT INTO credentials
+                        (id, provider, name, masked_identifier, auto_protect, threshold, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            credential_id,
+                            provider,
+                            name,
+                            masked,
+                            int(auto_protect),
+                            threshold,
+                            now,
+                            now,
+                        ),
+                    )
+                    self._record_event_locked(
+                        credential_id, "credential_added", "success", {}
+                    )
+            except Exception:
+                self.vault.delete(credential_id)
+                raise
+            row = self._db.execute(
+                "SELECT * FROM credentials WHERE id = ?", (credential_id,)
+            ).fetchone()
+        if row is None:
             raise RuntimeError("Credential record was not persisted")
-        return created
+        return self._public(row)
 
     def update_credential(
         self, credential_id: str, values: dict[str, Any]
     ) -> dict[str, Any] | None:
-        current = self.get_credential(credential_id)
-        if current is None:
-            return None
-
-        secret = values.pop("api_key", None)
-        old_secret: str | None = None
-        if secret is not None:
-            old_secret = self.vault.get(credential_id)
-            self.vault.set(credential_id, secret)
-            values["masked_identifier"] = (
-                f"••••{secret[-4:]}" if len(secret) >= 4 else "••••"
-            )
-
-        provider = values.get("provider", current["provider"])
-        name = values.get("name", current["name"])
-        masked_identifier = values.get(
-            "masked_identifier", current["masked_identifier"]
-        )
-        threshold = values.get("threshold", current["threshold"])
-        auto_protect = values.get("auto_protect", current["auto_protect"])
-
-        try:
-            with self._lock, self._db:
-                self._db.execute(
-                    """
-                    UPDATE credentials
-                    SET provider = ?, name = ?, masked_identifier = ?, threshold = ?,
-                        auto_protect = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        provider,
-                        name,
-                        masked_identifier,
-                        threshold,
-                        int(auto_protect),
-                        utc_now(),
-                        credential_id,
-                    ),
-                )
-                self._record_event_locked(
-                    credential_id, "credential_updated", "success", {}
-                )
-        except Exception:
+        values = dict(values)
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM credentials WHERE id = ?", (credential_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            current = self._public(row)
+            secret = values.pop("api_key", None)
+            old_secret: str | None = None
             if secret is not None:
-                if old_secret is None:
-                    self.vault.delete(credential_id)
-                else:
-                    self.vault.set(credential_id, old_secret)
-            raise
-        return self.get_credential(credential_id)
+                old_secret = self.vault.get(credential_id)
+                self.vault.set(credential_id, secret)
+                values["masked_identifier"] = (
+                    f"••••{secret[-4:]}" if len(secret) > 4 else "••••"
+                )
+            try:
+                with self._db:
+                    self._db.execute(
+                        """
+                        UPDATE credentials
+                        SET provider = ?, name = ?, masked_identifier = ?, threshold = ?,
+                            auto_protect = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            values.get("provider", current["provider"]),
+                            values.get("name", current["name"]),
+                            values.get(
+                                "masked_identifier", current["masked_identifier"]
+                            ),
+                            values.get("threshold", current["threshold"]),
+                            int(values.get("auto_protect", current["auto_protect"])),
+                            utc_now(),
+                            credential_id,
+                        ),
+                    )
+                    self._record_event_locked(
+                        credential_id, "credential_updated", "success", {}
+                    )
+            except Exception:
+                if secret is not None:
+                    if old_secret is None:
+                        self.vault.delete(credential_id)
+                    else:
+                        self.vault.set(credential_id, old_secret)
+                raise
+            updated = self._db.execute(
+                "SELECT * FROM credentials WHERE id = ?", (credential_id,)
+            ).fetchone()
+        return self._public(updated) if updated else None
 
     def delete_credential(self, credential_id: str) -> bool:
-        current = self.get_credential(credential_id)
-        if current is None:
-            return False
-        old_secret = self.vault.get(credential_id)
-        self.vault.delete(credential_id)
-        try:
-            with self._lock, self._db:
-                cursor = self._db.execute(
-                    "DELETE FROM credentials WHERE id = ?", (credential_id,)
-                )
-        except Exception:
-            if old_secret is not None:
-                self.vault.set(credential_id, old_secret)
-            raise
-        return cursor.rowcount > 0
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id FROM credentials WHERE id = ?", (credential_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            old_secret = self.vault.get(credential_id)
+            self.vault.delete(credential_id)
+            try:
+                with self._db:
+                    cursor = self._db.execute(
+                        "DELETE FROM credentials WHERE id = ?", (credential_id,)
+                    )
+            except Exception:
+                if old_secret is not None:
+                    self.vault.set(credential_id, old_secret)
+                raise
+            return cursor.rowcount > 0
 
     def set_paused(self, credential_id: str, paused: bool) -> dict[str, Any] | None:
         status = "paused" if paused else "watching"
@@ -234,13 +240,19 @@ class Store:
         result: str,
         details: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        if self.get_credential(credential_id) is None:
-            return None
         with self._lock, self._db:
+            exists = self._db.execute(
+                "SELECT 1 FROM credentials WHERE id = ?", (credential_id,)
+            ).fetchone()
+            if exists is None:
+                return None
             event_id = self._record_event_locked(
                 credential_id, event_type, result, details or {}
             )
-        return self._event_by_id(event_id)
+            row = self._db.execute(
+                "SELECT * FROM events WHERE id = ?", (event_id,)
+            ).fetchone()
+        return self._event_public(row) if row else None
 
     def _record_event_locked(
         self, credential_id: str, event_type: str, result: str, details: dict[str, Any]
@@ -279,9 +291,12 @@ class Store:
         }
 
     def history(self, credential_id: str) -> list[dict[str, Any]] | None:
-        if self.get_credential(credential_id) is None:
-            return None
         with self._lock:
+            exists = self._db.execute(
+                "SELECT 1 FROM credentials WHERE id = ?", (credential_id,)
+            ).fetchone()
+            if exists is None:
+                return None
             rows = self._db.execute(
                 "SELECT * FROM events WHERE credential_id = ? ORDER BY id DESC",
                 (credential_id,),

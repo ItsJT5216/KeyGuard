@@ -26,11 +26,13 @@ Open the dashboard with:
 keyguard open
 ```
 
-The dashboard may be closed without stopping monitoring. Reopening it reconnects to the same daemon and SQLite state.
+The dashboard may be closed without stopping the daemon. Reopening it reconnects to the same daemon and SQLite state. Adaptive polling and provider protection are added by X-6 and X-7.
 
 ## Security boundary
 
 - The server binds to `127.0.0.1` only.
+- A per-user owner-readable token authenticates the loopback API. The launcher passes it in the URL fragment, which the page exchanges for an HttpOnly, SameSite session cookie before clearing the fragment.
+- Requests reject unexpected Host and Origin values to prevent non-local browser access and DNS rebinding.
 - Credential writes require JSON and reject non-local browser origins.
 - Raw API keys are handed directly to Secret Service and are never written to SQLite, returned by GET endpoints, rendered into the dashboard, or placed in logs.
 - If Secret Service is unavailable, credential writes fail closed.

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hmac
 import json
 import logging
+import math
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from typing import Any
@@ -42,12 +45,15 @@ def _threshold(value: Any) -> float | None:
         raise ApiError(
             422, "VALIDATION_ERROR", "threshold must be a non-negative number"
         )
-    result = float(value)
-    if result < 0 or result > 1_000_000_000:
+    if (
+        (isinstance(value, float) and not math.isfinite(value))
+        or value < 0
+        or value > 1_000_000_000
+    ):
         raise ApiError(
             422, "VALIDATION_ERROR", "threshold must be a non-negative number"
         )
-    return result
+    return float(value)
 
 
 def _boolean(value: Any, field: str, default: bool = False) -> bool:
@@ -58,7 +64,7 @@ def _boolean(value: Any, field: str, default: bool = False) -> bool:
     return value
 
 
-def make_handler(store: Store):
+def make_handler(store: Store, auth_token: str):
     class Handler(BaseHTTPRequestHandler):
         server_version = "KeyGuard"
         sys_version = ""
@@ -100,16 +106,45 @@ def make_handler(store: Store):
                 error.status, {"error": {"code": error.code, "message": error.message}}
             )
 
+        def _require_host(self) -> None:
+            port = self.server.server_port
+            allowed = {
+                f"127.0.0.1:{port}",
+                f"localhost:{port}",
+                f"[::1]:{port}",
+            }
+            if self.headers.get("Host") not in allowed:
+                raise ApiError(421, "HOST_REJECTED", "Request host is not local")
+
+        def _token_from_request(self) -> str | None:
+            authorization = self.headers.get("Authorization", "")
+            if authorization.startswith("Bearer "):
+                return authorization.removeprefix("Bearer ").strip()
+            cookie = SimpleCookie()
+            cookie.load(self.headers.get("Cookie", ""))
+            session = cookie.get("keyguard_session")
+            return session.value if session else None
+
+        def _require_auth(self) -> None:
+            candidate = self._token_from_request()
+            if candidate is None or not hmac.compare_digest(candidate, auth_token):
+                raise ApiError(401, "AUTH_REQUIRED", "KeyGuard authentication required")
+
+        def _prepare(self, *, authenticate: bool = True) -> None:
+            self._require_host()
+            if authenticate:
+                self._require_auth()
+
         def _require_local_origin(self) -> None:
             origin = self.headers.get("Origin")
             if not origin:
                 return
             parsed = urlparse(origin)
-            if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
-                "127.0.0.1",
-                "localhost",
-                "::1",
-            }:
+            if (
+                parsed.scheme != "http"
+                or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+                or parsed.port != self.server.server_port
+            ):
                 raise ApiError(403, "ORIGIN_REJECTED", "Request origin is not local")
 
         def _body(self) -> dict[str, Any]:
@@ -145,6 +180,7 @@ def make_handler(store: Store):
 
         def do_GET(self) -> None:
             try:
+                self._prepare(authenticate=False)
                 path = urlparse(self.path).path
                 if path in STATIC_FILES:
                     resource_name, content_type = STATIC_FILES[path]
@@ -157,6 +193,7 @@ def make_handler(store: Store):
                     self.end_headers()
                     self.wfile.write(body)
                     return
+                self._require_auth()
                 segments = self._segments(self.path)
                 if segments == ["api", "status"]:
                     self._json(200, {"status": "ok", "service": "keyguard"})
@@ -189,6 +226,18 @@ def make_handler(store: Store):
         def do_POST(self) -> None:
             try:
                 segments = self._segments(self.path)
+                self._prepare()
+                if segments == ["api", "session"]:
+                    self._require_local_origin()
+                    self.send_response(204)
+                    self.send_header("Content-Length", "0")
+                    self.send_header(
+                        "Set-Cookie",
+                        f"keyguard_session={auth_token}; HttpOnly; SameSite=Strict; Path=/api/",
+                    )
+                    self._security_headers(api=True)
+                    self.end_headers()
+                    return
                 body = self._body()
                 if segments == ["api", "credentials"]:
                     allowed = {
@@ -268,6 +317,7 @@ def make_handler(store: Store):
 
         def do_PATCH(self) -> None:
             try:
+                self._prepare()
                 segments = self._segments(self.path)
                 if len(segments) != 3 or segments[:2] != ["api", "credentials"]:
                     raise ApiError(404, "NOT_FOUND", "Route not found")
@@ -308,6 +358,7 @@ def make_handler(store: Store):
 
         def do_DELETE(self) -> None:
             try:
+                self._prepare()
                 self._require_local_origin()
                 segments = self._segments(self.path)
                 if len(segments) != 3 or segments[:2] != ["api", "credentials"]:
@@ -330,5 +381,7 @@ def make_handler(store: Store):
     return Handler
 
 
-def create_server(store: Store, port: int = 17832) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer(("127.0.0.1", port), make_handler(store))
+def create_server(
+    store: Store, auth_token: str, port: int = 17832
+) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer(("127.0.0.1", port), make_handler(store, auth_token))

@@ -7,8 +7,8 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: #0d0d0d; }
 main { width: min(980px, calc(100% - 40px)); margin: 0 auto; padding: 56px 0 80px; }
-header { border-left: 2px solid #cc0000; padding-left: 20px; margin-bottom: 48px; }
-.eyebrow, .provider { color: #cc0000; letter-spacing: .12em; font-size: .75rem; font-weight: 700; }
+header { border-left: 2px solid #ff5c5c; padding-left: 20px; margin-bottom: 48px; }
+.eyebrow, .provider { color: #ff5c5c; letter-spacing: .12em; font-size: .75rem; font-weight: 700; }
 h1 { margin: 4px 0 8px; font-size: clamp(2.5rem, 7vw, 5rem); font-weight: 620; }
 h2 { font-size: 1rem; letter-spacing: .08em; text-transform: uppercase; color: #ccc; }
 h3 { margin: 4px 0; }

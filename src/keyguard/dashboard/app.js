@@ -22,17 +22,25 @@ function text(tag, value, className) {
 }
 
 async function setPaused(id, paused) {
-  await api(`/api/credentials/${encodeURIComponent(id)}/${paused ? "pause" : "resume"}`, {
-    method: "POST",
-    body: "{}",
-  });
-  await loadCredentials();
+  try {
+    await api(`/api/credentials/${encodeURIComponent(id)}/${paused ? "pause" : "resume"}`, {
+      method: "POST",
+      body: "{}",
+    });
+    await loadCredentials();
+  } catch (error) {
+    message.textContent = error.message;
+  }
 }
 
 async function removeCredential(id) {
   if (!window.confirm("Remove this credential from KeyGuard and GNOME Keyring?")) return;
-  await api(`/api/credentials/${encodeURIComponent(id)}`, {method: "DELETE"});
-  await loadCredentials();
+  try {
+    await api(`/api/credentials/${encodeURIComponent(id)}`, {method: "DELETE"});
+    await loadCredentials();
+  } catch (error) {
+    message.textContent = error.message;
+  }
 }
 
 function card(credential) {
@@ -96,4 +104,24 @@ form.addEventListener("submit", async (event) => {
 });
 
 document.querySelector("#refresh").addEventListener("click", loadCredentials);
-loadCredentials();
+
+async function start() {
+  const token = new URLSearchParams(window.location.hash.slice(1)).get("token");
+  if (!token) {
+    message.textContent = "Open KeyGuard from its launcher to authenticate.";
+    return;
+  }
+  try {
+    const response = await fetch("/api/session", {
+      method: "POST",
+      headers: {Authorization: `Bearer ${token}`},
+    });
+    if (!response.ok) throw new Error("KeyGuard authentication failed");
+    history.replaceState(null, "", `${location.pathname}${location.search}`);
+    await loadCredentials();
+  } catch (error) {
+    message.textContent = error.message;
+  }
+}
+
+start();
