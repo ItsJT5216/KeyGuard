@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=KeyGuard
+Comment=Open the KeyGuard credential dashboard
+Exec=keyguard open
+Icon=security-high
+Terminal=false
+Categories=Utility;Security;

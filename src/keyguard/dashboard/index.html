@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>KeyGuard</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background:#101114; color:#f7f7f8; }
+    body { max-width:900px; margin:0 auto; padding:2rem; }
+    header { display:flex; justify-content:space-between; align-items:center; }
+    .muted { color:#a7abb4; }
+    form,.card { background:#191b20; border:1px solid #2a2e36; border-radius:14px; padding:1rem; margin:1rem 0; }
+    form { display:grid; grid-template-columns:1fr 1fr; gap:.75rem; }
+    input,button { border-radius:8px; border:1px solid #3a3f49; padding:.7rem; font:inherit; }
+    input { background:#111318; color:inherit; }
+    button { background:#7c5cff; color:white; cursor:pointer; }
+    .actions { display:flex; gap:.5rem; flex-wrap:wrap; }
+    .actions button { background:#2a2e36; }
+    .wide { grid-column:1/-1; }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>KeyGuard</h1><p class="muted">Secrets stay in your keyring. The browser only sees masked metadata.</p></div>
+    <span id="daemon">Connecting…</span>
+  </header>
+
+  <form id="credential-form" autocomplete="off">
+    <input name="provider" placeholder="Provider" required>
+    <input name="name" placeholder="Friendly name" required>
+    <input name="secret" type="password" placeholder="API key" required class="wide">
+    <input name="threshold" type="number" min="0" step="any" placeholder="Kill threshold (optional)">
+    <button type="submit">Save credential</button>
+  </form>
+
+  <main id="credentials"></main>
+
+  <script>
+    const api = async (path, options = {}) => {
+      const response = await fetch(path, {
+        ...options,
+        headers: {'Content-Type': 'application/json', ...(options.headers || {})}
+      });
+      if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
+      return response.status === 204 ? null : response.json();
+    };
+
+    const escapeHtml = value => String(value).replace(
+      /[&<>"']/g,
+      character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[character]
+    );
+
+    const render = async () => {
+      const status = await api('/api/status');
+      document.querySelector('#daemon').textContent = `Daemon online · ${status.credential_count} saved`;
+      const credentials = await api('/api/credentials');
+      document.querySelector('#credentials').innerHTML = credentials.length
+        ? credentials.map(item => `
+          <section class="card">
+            <h2>${escapeHtml(item.name)}</h2>
+            <p class="muted">${escapeHtml(item.provider)} · ${escapeHtml(item.masked_hint)}</p>
+            <p>Status: ${escapeHtml(item.status)} · Threshold: ${escapeHtml(item.threshold ?? 'not set')}</p>
+            <div class="actions">
+              <button data-action="check" data-id="${item.id}">Check now</button>
+              <button data-action="${item.paused ? 'resume' : 'pause'}" data-id="${item.id}">
+                ${item.paused ? 'Resume' : 'Pause'}
+              </button>
+              <button data-action="delete" data-id="${item.id}">Remove</button>
+            </div>
+          </section>`).join('')
+        : '<p class="muted">Add a credential to begin.</p>';
+    };
+
+    document.querySelector('#credential-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      await api('/api/credentials', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: form.get('provider'),
+          name: form.get('name'),
+          secret: form.get('secret'),
+          threshold: form.get('threshold') ? Number(form.get('threshold')) : null
+        })
+      });
+      event.currentTarget.reset();
+      await render();
+    });
+
+    document.querySelector('#credentials').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const {action, id} = button.dataset;
+      if (action === 'delete') {
+        if (!confirm('Remove this credential from KeyGuard and the system keyring?')) return;
+        await api(`/api/credentials/${id}`, {method: 'DELETE'});
+      } else {
+        await api(`/api/credentials/${id}/${action}`, {method: 'POST'});
+      }
+      await render();
+    });
+
+    render().catch(error => {
+      document.querySelector('#daemon').textContent = `Unavailable: ${error.message}`;
+    });
+  </script>
+</body>
+</html>
