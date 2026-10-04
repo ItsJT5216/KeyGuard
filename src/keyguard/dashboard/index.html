@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KeyGuard</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">LOCAL CREDIT PROTECTION</p>
+      <h1>KeyGuard</h1>
+      <p class="lede">Secrets stay in GNOME Keyring. This page reads only daemon state.</p>
+    </header>
+
+    <section aria-labelledby="add-title">
+      <h2 id="add-title">Add credential</h2>
+      <form id="credential-form">
+        <label>Provider <input name="provider" required maxlength="80" autocomplete="off"></label>
+        <label>Friendly name <input name="name" required maxlength="120" autocomplete="off"></label>
+        <label>API key <input name="api_key" type="password" required maxlength="16384" autocomplete="new-password"></label>
+        <label>Kill threshold <input name="threshold" type="number" min="0" step="any"></label>
+        <label class="check"><input name="auto_protect" type="checkbox"> Auto Protect</label>
+        <button type="submit">Save to Keyring</button>
+      </form>
+      <p id="form-message" role="status"></p>
+    </section>
+
+    <section aria-labelledby="keys-title">
+      <div class="section-heading">
+        <h2 id="keys-title">Credentials</h2>
+        <button id="refresh" type="button">Refresh</button>
+      </div>
+      <div id="credentials" class="credentials"></div>
+    </section>
+  </main>
+</body>
+</html>
