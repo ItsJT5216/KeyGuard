@@ -25,6 +25,7 @@ class Store:
         self._lock = threading.RLock()
         self.vault = vault
         self._migrate()
+        self._recover_incomplete_credentials()
         try:
             self.path.chmod(0o600)
         except FileNotFoundError:
@@ -66,6 +67,57 @@ class Store:
                 )
                 """
             )
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS usage_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    credential_id TEXT NOT NULL,
+                    checked_at TEXT NOT NULL,
+                    used REAL,
+                    configured_limit REAL,
+                    remaining REAL,
+                    unit TEXT,
+                    success INTEGER NOT NULL,
+                    error_code TEXT,
+                    FOREIGN KEY (credential_id) REFERENCES credentials(id) ON DELETE CASCADE
+                )
+                """
+            )
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scheduler_state (
+                    credential_id TEXT PRIMARY KEY,
+                    last_check_at TEXT,
+                    next_check_at TEXT,
+                    current_interval_seconds INTEGER,
+                    polling_tier TEXT,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY (credential_id) REFERENCES credentials(id) ON DELETE CASCADE
+                )
+                """
+            )
+
+    def _recover_incomplete_credentials(self) -> None:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id FROM credentials WHERE status = 'provisioning'"
+            ).fetchall()
+            for row in rows:
+                credential_id = row["id"]
+                secret = self.vault.get(credential_id)
+                with self._db:
+                    if secret is None:
+                        self._db.execute(
+                            "DELETE FROM credentials WHERE id = ?", (credential_id,)
+                        )
+                    else:
+                        self._db.execute(
+                            "UPDATE credentials SET status = 'watching', updated_at = ? WHERE id = ?",
+                            (utc_now(), credential_id),
+                        )
+                        self._record_event_locked(
+                            credential_id, "credential_recovered", "success", {}
+                        )
 
     @staticmethod
     def _public(row: sqlite3.Row) -> dict[str, Any]:
@@ -109,31 +161,58 @@ class Store:
         now = utc_now()
         masked = f"••••{secret[-4:]}" if len(secret) > 4 else "••••"
         with self._lock:
-            self.vault.set(credential_id, secret)
+            with self._db:
+                self._db.execute(
+                    """
+                    INSERT INTO credentials
+                    (id, provider, name, masked_identifier, status, auto_protect,
+                     threshold, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'provisioning', ?, ?, ?, ?)
+                    """,
+                    (
+                        credential_id,
+                        provider,
+                        name,
+                        masked,
+                        int(auto_protect),
+                        threshold,
+                        now,
+                        now,
+                    ),
+                )
+            try:
+                self.vault.set(credential_id, secret)
+            except Exception:
+                with self._db:
+                    self._db.execute(
+                        "DELETE FROM credentials WHERE id = ?", (credential_id,)
+                    )
+                raise
             try:
                 with self._db:
                     self._db.execute(
-                        """
-                        INSERT INTO credentials
-                        (id, provider, name, masked_identifier, auto_protect, threshold, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            credential_id,
-                            provider,
-                            name,
-                            masked,
-                            int(auto_protect),
-                            threshold,
-                            now,
-                            now,
-                        ),
+                        "UPDATE credentials SET status = 'watching', updated_at = ? WHERE id = ?",
+                        (utc_now(), credential_id),
                     )
                     self._record_event_locked(
                         credential_id, "credential_added", "success", {}
                     )
             except Exception:
-                self.vault.delete(credential_id)
+                try:
+                    self.vault.delete(credential_id)
+                except Exception as cleanup_error:
+                    with self._db:
+                        self._db.execute(
+                            "UPDATE credentials SET status = 'cleanup_required', updated_at = ? WHERE id = ?",
+                            (utc_now(), credential_id),
+                        )
+                    raise RuntimeError(
+                        "Credential creation failed; cleanup remains tracked"
+                    ) from cleanup_error
+                with self._db:
+                    self._db.execute(
+                        "DELETE FROM credentials WHERE id = ?", (credential_id,)
+                    )
                 raise
             row = self._db.execute(
                 "SELECT * FROM credentials WHERE id = ?", (credential_id,)

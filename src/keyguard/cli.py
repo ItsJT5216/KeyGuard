@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
+import json
 import logging
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -13,19 +17,40 @@ import urllib.request
 import webbrowser
 
 from .api import create_server
-from .auth import load_or_create_token
-from .paths import applications_dir, auth_token_path, database_path, systemd_user_dir
+from .auth import load_or_create_token, mint_bootstrap
+from .paths import (
+    applications_dir,
+    auth_token_path,
+    database_path,
+    runtime_port_path,
+    systemd_user_dir,
+)
 from .store import Store
 from .vault import KeyringVault
 
-DEFAULT_PORT = 17832
+
+def _read_port() -> int | None:
+    try:
+        value = int(runtime_port_path().read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+    return value if 1024 <= value <= 65535 else None
 
 
-def _port() -> int:
-    value = int(os.environ.get("KEYGUARD_PORT", DEFAULT_PORT))
-    if not 1024 <= value <= 65535:
-        raise SystemExit("KEYGUARD_PORT must be between 1024 and 65535")
-    return value
+def _write_port(port: int) -> None:
+    path = runtime_port_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(16)}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(f"{port}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def serve() -> None:
@@ -33,7 +58,15 @@ def serve() -> None:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
     store = Store(database_path(), KeyringVault())
-    server = create_server(store, load_or_create_token(auth_token_path()), _port())
+    token = load_or_create_token(auth_token_path())
+    preferred_port = _read_port() or 0
+    try:
+        server = create_server(store, token, preferred_port)
+    except OSError:
+        if not preferred_port:
+            raise
+        server = create_server(store, token, 0)
+    _write_port(server.server_port)
     logging.getLogger("keyguard").info(
         "KeyGuard listening on 127.0.0.1:%s", server.server_port
     )
@@ -46,18 +79,26 @@ def serve() -> None:
         store.close()
 
 
-def _wait_for_daemon(port: int, token: str) -> None:
-    url = f"http://127.0.0.1:{port}/api/status"
+def _challenge(port: int, token: str) -> bool:
+    nonce = secrets.token_hex(32)
+    url = f"http://127.0.0.1:{port}/api/challenge?nonce={nonce}"
+    expected = hmac.new(token.encode(), nonce.encode(), hashlib.sha256).hexdigest()
+    request = urllib.request.Request(url)
+    with urllib.request.urlopen(request, timeout=0.5) as response:  # noqa: S310
+        payload = json.loads(response.read())
+    proof = payload.get("proof") if isinstance(payload, dict) else None
+    return isinstance(proof, str) and hmac.compare_digest(proof, expected)
+
+
+def _wait_for_daemon(token: str) -> int:
     for _ in range(40):
         try:
-            request = urllib.request.Request(
-                url, headers={"Authorization": f"Bearer {token}"}
-            )
-            with urllib.request.urlopen(request, timeout=0.5) as response:  # noqa: S310
-                if response.status == 200:
-                    return
-        except (OSError, urllib.error.URLError):
-            time.sleep(0.1)
+            port = _read_port()
+            if port is not None and _challenge(port, token):
+                return port
+        except (OSError, ValueError, urllib.error.URLError):
+            pass
+        time.sleep(0.1)
     raise SystemExit("KeyGuard daemon did not become ready")
 
 
@@ -69,13 +110,13 @@ def _systemctl() -> str:
 
 
 def open_dashboard() -> None:
-    port = _port()
     token = load_or_create_token(auth_token_path())
     subprocess.run(  # noqa: S603 - systemctl is resolved to an absolute path
         [_systemctl(), "--user", "start", "keyguard.service"], check=True
     )
-    _wait_for_daemon(port, token)
-    fragment = urllib.parse.quote(token, safe="")
+    port = _wait_for_daemon(token)
+    bootstrap = mint_bootstrap(token)
+    fragment = urllib.parse.quote(bootstrap, safe="")
     webbrowser.open(f"http://127.0.0.1:{port}/#token={fragment}", new=2)
 
 

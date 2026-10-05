@@ -13,7 +13,12 @@ from keyring.errors import PasswordDeleteError
 
 from keyguard import cli
 from keyguard.api import create_server
-from keyguard.auth import load_or_create_token
+from keyguard.auth import (
+    BOOTSTRAP_TTL_SECONDS,
+    SessionAuthority,
+    load_or_create_token,
+    mint_bootstrap,
+)
 from keyguard.store import Store
 from keyguard.vault import SERVICE_NAME, KeyringVault
 
@@ -44,6 +49,18 @@ class BlockingVault(FakeVault):
             self.entered.set()
             self.release.wait(timeout=2)
         super().set(credential_id, secret)
+
+
+class CleanupFailVault(FakeVault):
+    def delete(self, credential_id: str) -> None:
+        raise RuntimeError("vault cleanup failed")
+
+
+def authorize(server) -> str:
+    bootstrap = mint_bootstrap("test-token-that-is-long-enough-123456")
+    session = server.authority.exchange_bootstrap(bootstrap)
+    assert session is not None
+    return session
 
 
 class FoundationTests(unittest.TestCase):
@@ -137,6 +154,7 @@ class FoundationTests(unittest.TestCase):
     def test_api_never_returns_raw_secret_and_rejects_remote_origin(self) -> None:
         token = "test-token-that-is-long-enough-123456"
         server = create_server(self.store, token, 0)
+        session = authorize(server)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         base = f"http://127.0.0.1:{server.server_port}"
@@ -158,7 +176,7 @@ class FoundationTests(unittest.TestCase):
                 method="POST",
                 headers={
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {token}",
+                    "Authorization": f"KeyGuard-Session {session}",
                 },
             )
             with urllib.request.urlopen(request) as response:
@@ -167,7 +185,7 @@ class FoundationTests(unittest.TestCase):
 
             listing = urllib.request.Request(
                 f"{base}/api/credentials",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": f"KeyGuard-Session {session}"},
             )
             with urllib.request.urlopen(listing) as response:
                 list_payload = response.read()
@@ -181,7 +199,7 @@ class FoundationTests(unittest.TestCase):
                 headers={
                     "Content-Type": "application/json",
                     "Origin": "https://attacker.example",
-                    "Authorization": f"Bearer {token}",
+                    "Authorization": f"KeyGuard-Session {session}",
                 },
             )
             with self.assertRaises(urllib.error.HTTPError) as context:
@@ -223,12 +241,63 @@ class FoundationTests(unittest.TestCase):
 
     def test_auth_token_is_stable_and_owner_only(self) -> None:
         path = Path(self.temp.name) / "private" / "api-token"
-        token = load_or_create_token(path)
-        self.assertEqual(token, load_or_create_token(path))
+        tokens: list[str] = []
+        threads = [
+            threading.Thread(target=lambda: tokens.append(load_or_create_token(path)))
+            for _ in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+        self.assertEqual(8, len(tokens))
+        self.assertEqual(1, len(set(tokens)))
+        self.assertEqual(tokens[0], load_or_create_token(path))
         self.assertEqual(0o600, path.stat().st_mode & 0o777)
         self.assertEqual(0o700, path.parent.stat().st_mode & 0o777)
 
-    def test_api_requires_auth_validates_host_and_uses_http_only_session(self) -> None:
+    def test_api_preserves_secret_whitespace_exactly(self) -> None:
+        token = "test-token-that-is-long-enough-123456"
+        server = create_server(self.store, token, 0)
+        session = authorize(server)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        secret = " leading-and-trailing-secret "
+        try:
+            request = urllib.request.Request(
+                f"{base}/api/credentials",
+                data=json.dumps(
+                    {"provider": "Example", "name": "Primary", "api_key": secret}
+                ).encode(),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"KeyGuard-Session {session}",
+                },
+            )
+            with urllib.request.urlopen(request) as response:
+                created = json.loads(response.read())["credential"]
+            self.assertEqual(secret, self.vault.secrets[created["id"]])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_foundation_schema_includes_snapshot_and_scheduler_state(self) -> None:
+        tables = {
+            row[0]
+            for row in self.store._db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        self.assertTrue(
+            {"credentials", "events", "usage_snapshots", "scheduler_state"} <= tables
+        )
+
+    def test_api_uses_challenge_one_time_bootstrap_and_origin_scoped_session(
+        self,
+    ) -> None:
         token = "test-token-that-is-long-enough-123456"
         server = create_server(self.store, token, 0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -240,28 +309,45 @@ class FoundationTests(unittest.TestCase):
             self.assertEqual(401, unauthorized.exception.code)
             unauthorized.exception.close()
 
+            nonce = "a" * 64
+            with urllib.request.urlopen(
+                f"{base}/api/challenge?nonce={nonce}"
+            ) as response:
+                challenge = json.loads(response.read())
+            self.assertEqual(
+                SessionAuthority(token).challenge(nonce), challenge["proof"]
+            )
+
+            bootstrap_token = mint_bootstrap(token)
+            exchange = urllib.request.Request(
+                f"{base}/api/session",
+                data=b"",
+                method="POST",
+                headers={"Authorization": f"KeyGuard-Bootstrap {bootstrap_token}"},
+            )
+            with urllib.request.urlopen(exchange) as response:
+                session = json.loads(response.read())["session_token"]
+
+            with self.assertRaises(urllib.error.HTTPError) as reused:
+                urllib.request.urlopen(exchange)
+            self.assertEqual(401, reused.exception.code)
+            reused.exception.close()
+
             bad_host = urllib.request.Request(
                 f"{base}/api/status",
-                headers={"Authorization": f"Bearer {token}", "Host": "evil.example"},
+                headers={
+                    "Authorization": f"KeyGuard-Session {session}",
+                    "Host": "evil.example",
+                },
             )
             with self.assertRaises(urllib.error.HTTPError) as rejected:
                 urllib.request.urlopen(bad_host)
             self.assertEqual(421, rejected.exception.code)
             rejected.exception.close()
 
-            session = urllib.request.Request(
-                f"{base}/api/session",
-                data=b"",
-                method="POST",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            with urllib.request.urlopen(session) as response:
-                cookie = response.headers["Set-Cookie"]
-            self.assertIn("HttpOnly", cookie)
-            self.assertIn("SameSite=Strict", cookie)
-
             status = urllib.request.Request(
-                f"{base}/api/status", headers={"Cookie": cookie.split(";", 1)[0]}
+                f"{base}/api/status",
+                headers={"Authorization": f"KeyGuard-Session {session}"},
             )
             with urllib.request.urlopen(status) as response:
                 self.assertEqual(200, response.status)
@@ -270,9 +356,35 @@ class FoundationTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_bootstrap_rejects_expired_and_tampered_capabilities(self) -> None:
+        token = "test-token-that-is-long-enough-123456"
+        authority = SessionAuthority(token)
+        expired = mint_bootstrap(token, issued_at=0)
+        current = mint_bootstrap(token)
+        prefix, signature = current.rsplit(".", 1)
+
+        self.assertIsNone(authority.exchange_bootstrap(expired))
+        self.assertIsNone(
+            authority.exchange_bootstrap(
+                f"{prefix}.{('0' if signature[0] != '0' else '1')}{signature[1:]}"
+            )
+        )
+        self.assertGreater(BOOTSTRAP_TTL_SECONDS, 0)
+
+    def test_dashboard_never_persists_owner_or_provider_secrets(self) -> None:
+        script = (
+            Path(__file__).parents[1] / "src" / "keyguard" / "dashboard" / "app.js"
+        ).read_text()
+
+        self.assertIn("sessionStorage", script)
+        self.assertNotIn("localStorage", script)
+        self.assertNotIn("document.cookie", script)
+        self.assertNotIn('setItem("api_key"', script)
+
     def test_api_rejects_non_finite_and_giant_thresholds(self) -> None:
         token = "test-token-that-is-long-enough-123456"
         server = create_server(self.store, token, 0)
+        session = authorize(server)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         base = f"http://127.0.0.1:{server.server_port}"
@@ -292,7 +404,7 @@ class FoundationTests(unittest.TestCase):
                     method="POST",
                     headers={
                         "Content-Type": "application/json",
-                        "Authorization": f"Bearer {token}",
+                        "Authorization": f"KeyGuard-Session {session}",
                     },
                 )
                 with self.assertRaises(urllib.error.HTTPError) as rejected:
@@ -333,6 +445,30 @@ class FoundationTests(unittest.TestCase):
         read.join(timeout=2)
         self.assertTrue(read_finished.is_set())
         self.assertEqual("Updated", self.store.get_credential(created["id"])["name"])
+
+    def test_failed_create_cleanup_keeps_orphan_discoverable(self) -> None:
+        self.store.close()
+        vault = CleanupFailVault()
+        self.store = Store(self.path, vault)
+        with (
+            patch.object(
+                self.store,
+                "_record_event_locked",
+                side_effect=RuntimeError("event write failed"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "cleanup remains tracked"),
+        ):
+            self.store.create_credential(
+                provider="Example",
+                name="Primary",
+                secret="secret",
+                threshold=None,
+                auto_protect=False,
+            )
+        records = self.store.list_credentials()
+        self.assertEqual(1, len(records))
+        self.assertEqual("cleanup_required", records[0]["status"])
+        self.assertIn(records[0]["id"], vault.secrets)
 
     def test_installer_generates_user_service_and_desktop_launcher(self) -> None:
         service_dir = Path(self.temp.name) / "systemd" / "user"
@@ -394,13 +530,17 @@ class FoundationTests(unittest.TestCase):
 
     def test_launcher_starts_or_reuses_daemon_then_opens_dashboard(self) -> None:
         with (
-            patch.object(cli, "_port", return_value=17832),
             patch.object(cli, "_systemctl", return_value="/usr/bin/systemctl"),
             patch.object(
                 cli, "auth_token_path", return_value=Path(self.temp.name) / "token"
             ),
             patch.object(cli.subprocess, "run") as run,
-            patch.object(cli, "_wait_for_daemon") as wait,
+            patch.object(cli, "_wait_for_daemon", return_value=24567) as wait,
+            patch.object(
+                cli,
+                "mint_bootstrap",
+                return_value="one-time-bootstrap-token-1234567890",
+            ),
             patch.object(cli.webbrowser, "open") as open_browser,
         ):
             cli.open_dashboard()
@@ -410,10 +550,19 @@ class FoundationTests(unittest.TestCase):
             check=True,
         )
         token = (Path(self.temp.name) / "token").read_text().strip()
-        wait.assert_called_once_with(17832, token)
+        wait.assert_called_once_with(token)
         open_browser.assert_called_once_with(
-            f"http://127.0.0.1:17832/#token={token}", new=2
+            "http://127.0.0.1:24567/#token=one-time-bootstrap-token-1234567890",
+            new=2,
         )
+
+    def test_runtime_port_is_owner_only_and_not_host_wide_fixed(self) -> None:
+        port_path = Path(self.temp.name) / "daemon-port"
+        with patch.object(cli, "runtime_port_path", return_value=port_path):
+            self.assertIsNone(cli._read_port())
+            cli._write_port(24567)
+            self.assertEqual(24567, cli._read_port())
+        self.assertEqual(0o600, port_path.stat().st_mode & 0o777)
 
     def test_delete_removes_secret_and_database_record(self) -> None:
         created = self.store.create_credential(

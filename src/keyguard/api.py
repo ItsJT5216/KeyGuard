@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import hmac
 import json
 import logging
 import math
-from http.cookies import SimpleCookie
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
+from string import hexdigits
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from .auth import SessionAuthority
 from .store import Store
 
 LOGGER = logging.getLogger("keyguard")
@@ -35,6 +36,14 @@ def _text(value: Any, field: str, *, maximum: int = 120) -> str:
     value = value.strip()
     if not value or len(value) > maximum or any(ord(char) < 32 for char in value):
         raise ApiError(422, "VALIDATION_ERROR", f"{field} is invalid")
+    return value
+
+
+def _secret(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ApiError(422, "VALIDATION_ERROR", "api_key must be text")
+    if not value or len(value) > 16_384 or any(ord(char) < 32 for char in value):
+        raise ApiError(422, "VALIDATION_ERROR", "api_key is invalid")
     return value
 
 
@@ -64,7 +73,36 @@ def _boolean(value: Any, field: str, default: bool = False) -> bool:
     return value
 
 
-def make_handler(store: Store, auth_token: str):
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, *args: Any, max_workers: int = 32, **kwargs: Any) -> None:
+        self._worker_slots = threading.BoundedSemaphore(max_workers)
+        super().__init__(*args, **kwargs)
+
+    def get_request(self) -> tuple[Any, Any]:
+        request, address = super().get_request()
+        request.settimeout(5)
+        return request, address
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._worker_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_slots.release()
+
+
+def make_handler(store: Store, authority: SessionAuthority):
     class Handler(BaseHTTPRequestHandler):
         server_version = "KeyGuard"
         sys_version = ""
@@ -116,24 +154,22 @@ def make_handler(store: Store, auth_token: str):
             if self.headers.get("Host") not in allowed:
                 raise ApiError(421, "HOST_REJECTED", "Request host is not local")
 
-        def _token_from_request(self) -> str | None:
+        def _header_token(self, scheme: str) -> str | None:
             authorization = self.headers.get("Authorization", "")
-            if authorization.startswith("Bearer "):
-                return authorization.removeprefix("Bearer ").strip()
-            cookie = SimpleCookie()
-            cookie.load(self.headers.get("Cookie", ""))
-            session = cookie.get("keyguard_session")
-            return session.value if session else None
+            prefix = f"{scheme} "
+            if authorization.startswith(prefix):
+                return authorization.removeprefix(prefix).strip()
+            return None
 
-        def _require_auth(self) -> None:
-            candidate = self._token_from_request()
-            if candidate is None or not hmac.compare_digest(candidate, auth_token):
+        def _require_session(self) -> None:
+            candidate = self._header_token("KeyGuard-Session")
+            if candidate is None or not authority.verify_session(candidate):
                 raise ApiError(401, "AUTH_REQUIRED", "KeyGuard authentication required")
 
         def _prepare(self, *, authenticate: bool = True) -> None:
             self._require_host()
             if authenticate:
-                self._require_auth()
+                self._require_session()
 
         def _require_local_origin(self) -> None:
             origin = self.headers.get("Origin")
@@ -193,8 +229,14 @@ def make_handler(store: Store, auth_token: str):
                     self.end_headers()
                     self.wfile.write(body)
                     return
-                self._require_auth()
                 segments = self._segments(self.path)
+                if segments == ["api", "challenge"]:
+                    nonce = parse_qs(urlparse(self.path).query).get("nonce", [""])[0]
+                    if len(nonce) != 64 or any(char not in hexdigits for char in nonce):
+                        raise ApiError(422, "VALIDATION_ERROR", "nonce is invalid")
+                    self._json(200, {"proof": authority.challenge(nonce)})
+                    return
+                self._require_session()
                 if segments == ["api", "status"]:
                     self._json(200, {"status": "ok", "service": "keyguard"})
                 elif segments == ["api", "credentials"]:
@@ -226,18 +268,20 @@ def make_handler(store: Store, auth_token: str):
         def do_POST(self) -> None:
             try:
                 segments = self._segments(self.path)
-                self._prepare()
+                self._prepare(authenticate=False)
                 if segments == ["api", "session"]:
                     self._require_local_origin()
-                    self.send_response(204)
-                    self.send_header("Content-Length", "0")
-                    self.send_header(
-                        "Set-Cookie",
-                        f"keyguard_session={auth_token}; HttpOnly; SameSite=Strict; Path=/api/",
+                    bootstrap = self._header_token("KeyGuard-Bootstrap")
+                    session = (
+                        authority.exchange_bootstrap(bootstrap) if bootstrap else None
                     )
-                    self._security_headers(api=True)
-                    self.end_headers()
+                    if session is None:
+                        raise ApiError(
+                            401, "AUTH_REQUIRED", "Bootstrap token is invalid"
+                        )
+                    self._json(200, {"session_token": session})
                     return
+                self._require_session()
                 body = self._body()
                 if segments == ["api", "credentials"]:
                     allowed = {
@@ -251,7 +295,7 @@ def make_handler(store: Store, auth_token: str):
                         raise ApiError(
                             422, "VALIDATION_ERROR", "Unknown credential field"
                         )
-                    secret = _text(body.get("api_key"), "api_key", maximum=16_384)
+                    secret = _secret(body.get("api_key"))
                     credential = store.create_credential(
                         provider=_text(body.get("provider"), "provider", maximum=80),
                         name=_text(body.get("name"), "name"),
@@ -331,9 +375,7 @@ def make_handler(store: Store, auth_token: str):
                 if "name" in body:
                     values["name"] = _text(body["name"], "name")
                 if "api_key" in body:
-                    values["api_key"] = _text(
-                        body["api_key"], "api_key", maximum=16_384
-                    )
+                    values["api_key"] = _secret(body["api_key"])
                 if "threshold" in body:
                     values["threshold"] = _threshold(body["threshold"])
                 if "auto_protect" in body:
@@ -383,5 +425,10 @@ def make_handler(store: Store, auth_token: str):
 
 def create_server(
     store: Store, auth_token: str, port: int = 17832
-) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer(("127.0.0.1", port), make_handler(store, auth_token))
+) -> BoundedThreadingHTTPServer:
+    authority = SessionAuthority(auth_token)
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", port), make_handler(store, authority)
+    )
+    server.authority = authority
+    return server

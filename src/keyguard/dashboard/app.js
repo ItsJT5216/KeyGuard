@@ -1,14 +1,22 @@
 const credentialList = document.querySelector("#credentials");
 const form = document.querySelector("#credential-form");
 const message = document.querySelector("#form-message");
+let sessionToken = window.sessionStorage.getItem("keyguardSession");
 
 async function api(path, options = {}) {
+  const headers = {...(options.headers || {})};
+  if (options.body) headers["Content-Type"] = "application/json";
+  if (sessionToken) headers.Authorization = `KeyGuard-Session ${sessionToken}`;
   const response = await fetch(path, {
     ...options,
-    headers: options.body ? {"Content-Type": "application/json"} : undefined,
+    headers,
   });
   const payload = response.status === 204 ? null : await response.json();
   if (!response.ok) {
+    if (response.status === 401) {
+      sessionToken = null;
+      window.sessionStorage.removeItem("keyguardSession");
+    }
     throw new Error(payload?.error?.message || payload?.error?.code || "Request failed");
   }
   return payload;
@@ -106,18 +114,30 @@ form.addEventListener("submit", async (event) => {
 document.querySelector("#refresh").addEventListener("click", loadCredentials);
 
 async function start() {
-  const token = new URLSearchParams(window.location.hash.slice(1)).get("token");
-  if (!token) {
+  const bootstrap = new URLSearchParams(window.location.hash.slice(1)).get("token");
+  history.replaceState(null, "", `${location.pathname}${location.search}`);
+  if (bootstrap) {
+    try {
+      const response = await fetch("/api/session", {
+        method: "POST",
+        headers: {Authorization: `KeyGuard-Bootstrap ${bootstrap}`},
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.session_token) {
+        throw new Error("KeyGuard authentication failed");
+      }
+      sessionToken = payload.session_token;
+      window.sessionStorage.setItem("keyguardSession", sessionToken);
+    } catch (error) {
+      message.textContent = error.message;
+      return;
+    }
+  }
+  if (!sessionToken) {
     message.textContent = "Open KeyGuard from its launcher to authenticate.";
     return;
   }
   try {
-    const response = await fetch("/api/session", {
-      method: "POST",
-      headers: {Authorization: `Bearer ${token}`},
-    });
-    if (!response.ok) throw new Error("KeyGuard authentication failed");
-    history.replaceState(null, "", `${location.pathname}${location.search}`);
     await loadCredentials();
   } catch (error) {
     message.textContent = error.message;

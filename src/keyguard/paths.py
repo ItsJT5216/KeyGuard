@@ -20,6 +20,10 @@ def auth_token_path() -> Path:
     return data_dir() / "api-token"
 
 
+def runtime_port_path() -> Path:
+    return data_dir() / "daemon-port"
+
+
 def systemd_user_dir() -> Path:
     return (
         Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))

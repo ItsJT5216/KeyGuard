@@ -6,7 +6,7 @@ This first foundation implements [Linear X-5](https://linear.app/itstanner5216/i
 
 - a loopback-only Python HTTP daemon;
 - GNOME Keyring storage through `keyring`, with no plaintext fallback;
-- SQLite storage for non-secret credential configuration and event history;
+- SQLite storage for non-secret credential configuration, usage snapshots, scheduler state, and event history;
 - a daemon-served HTML dashboard backed by the real API;
 - a user-service installer and desktop launcher.
 
@@ -31,7 +31,9 @@ The dashboard may be closed without stopping the daemon. Reopening it reconnects
 ## Security boundary
 
 - The server binds to `127.0.0.1` only.
-- A per-user owner-readable token authenticates the loopback API. The launcher passes it in the URL fragment, which the page exchanges for an HttpOnly, SameSite session cookie before clearing the fragment.
+- The daemon selects and records an owner-only per-user port, avoiding a host-wide fixed-port collision between desktop users.
+- A per-user owner token proves daemon identity with challenge-response. It is never put in a browser URL or cookie.
+- The launcher mints a signed, short-lived, one-use browser bootstrap. The dashboard exchanges it for an in-memory session kept in origin-scoped `sessionStorage` and attaches that session explicitly to API requests.
 - Requests reject unexpected Host and Origin values to prevent non-local browser access and DNS rebinding.
 - Credential writes require JSON and reject non-local browser origins.
 - Raw API keys are handed directly to Secret Service and are never written to SQLite, returned by GET endpoints, rendered into the dashboard, or placed in logs.
