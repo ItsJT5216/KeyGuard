@@ -2,6 +2,8 @@ const credentialList = document.querySelector("#credentials");
 const form = document.querySelector("#credential-form");
 const message = document.querySelector("#form-message");
 let sessionToken = window.sessionStorage.getItem("keyguardSession");
+let loadSequence = 0;
+let saving = false;
 
 async function api(path, options = {}) {
   const headers = {...(options.headers || {})};
@@ -41,6 +43,22 @@ async function setPaused(id, paused) {
   }
 }
 
+async function runAction(id, action) {
+  if (action === "protect" && !window.confirm("Run the configured provider protection action now?")) return;
+  try {
+    const result = await api(`/api/credentials/${encodeURIComponent(id)}/${action}`, {
+      method: "POST",
+      body: "{}",
+    });
+    message.textContent = action === "check"
+      ? `Checked: ${result.snapshot.used} ${result.snapshot.unit} used.`
+      : "Protection action verified by the provider.";
+    await loadCredentials();
+  } catch (error) {
+    message.textContent = error.message;
+  }
+}
+
 async function removeCredential(id) {
   if (!window.confirm("Remove this credential from KeyGuard and GNOME Keyring?")) return;
   try {
@@ -58,6 +76,13 @@ function card(credential) {
     text("h3", credential.name),
     text("p", credential.masked_identifier, "masked"),
     text("p", credential.paused ? "Paused" : credential.status, "status"),
+    text(
+      "p",
+      credential.available_actions.length
+        ? `Protection: ${credential.available_actions.join(", ")}`
+        : "Protection: notify only",
+      "masked",
+    ),
   );
   const controls = document.createElement("div");
   controls.className = "controls";
@@ -70,27 +95,43 @@ function card(credential) {
   remove.type = "button";
   remove.addEventListener("click", () => removeCredential(credential.id));
 
-  controls.append(pause, remove);
+  const check = text("button", "Check now");
+  check.type = "button";
+  check.addEventListener("click", () => runAction(credential.id, "check"));
+
+  const protect = text("button", "Protect now", "danger");
+  protect.type = "button";
+  protect.disabled = !credential.available_actions.length;
+  protect.addEventListener("click", () => runAction(credential.id, "protect"));
+
+  controls.append(check, pause, protect, remove);
   article.append(controls);
   return article;
 }
 
 async function loadCredentials() {
+  const sequence = ++loadSequence;
   credentialList.replaceChildren(text("p", "Loading…"));
   try {
     const {credentials} = await api("/api/credentials");
+    if (sequence !== loadSequence) return;
     if (!credentials.length) {
       credentialList.replaceChildren(text("p", "No credentials are being watched yet.", "empty"));
       return;
     }
     credentialList.replaceChildren(...credentials.map(card));
   } catch (error) {
+    if (sequence !== loadSequence) return;
     credentialList.replaceChildren(text("p", error.message, "error"));
   }
 }
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (saving) return;
+  saving = true;
+  const controls = [...form.elements];
+  controls.forEach((control) => { control.disabled = true; });
   message.textContent = "Saving…";
   const data = new FormData(form);
   const threshold = data.get("threshold");
@@ -100,7 +141,10 @@ form.addEventListener("submit", async (event) => {
     api_key: data.get("api_key"),
     threshold: threshold === "" ? null : Number(threshold),
     auto_protect: data.get("auto_protect") === "on",
+    protection_action: data.get("protection_action"),
   };
+  const keyHash = data.get("key_hash").trim();
+  if (keyHash) body.metadata = {key_hash: keyHash};
   try {
     await api("/api/credentials", {method: "POST", body: JSON.stringify(body)});
     form.reset();
@@ -108,6 +152,9 @@ form.addEventListener("submit", async (event) => {
     await loadCredentials();
   } catch (error) {
     message.textContent = error.message;
+  } finally {
+    saving = false;
+    controls.forEach((control) => { control.disabled = false; });
   }
 });
 
