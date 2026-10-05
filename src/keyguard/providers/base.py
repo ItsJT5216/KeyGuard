@@ -40,10 +40,13 @@ class ProviderAdapter(Protocol):
     capabilities: frozenset[str]
     actions: tuple[str, ...]
 
-    def validate_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]: ...
+    def validate_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        pass
 
-    def fetch_usage(self, secret: str, metadata: dict[str, Any]) -> UsageSnapshot: ...
+    def fetch_usage(self, secret: str, metadata: dict[str, Any]) -> UsageSnapshot:
+        pass
 
     def execute_action(
         self, action: str, secret: str, metadata: dict[str, Any]
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        pass

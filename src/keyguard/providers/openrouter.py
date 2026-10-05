@@ -29,7 +29,8 @@ class Transport(Protocol):
         path: str,
         token: str,
         body: dict[str, Any] | None = None,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        pass
 
 
 class OpenRouterTransport:

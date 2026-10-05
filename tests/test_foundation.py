@@ -211,6 +211,44 @@ class FoundationTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_create_rejects_invalid_provider_configuration_as_client_error(
+        self,
+    ) -> None:
+        token = "test-token-that-is-long-enough-123456"
+        server = create_server(self.store, token, 0)
+        session = authorize(server)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+
+        try:
+            request = urllib.request.Request(
+                f"{base}/api/credentials",
+                data=json.dumps(
+                    {
+                        "provider": "openrouter",
+                        "name": "Missing key hash",
+                        "api_key": "management-secret",
+                        "protection_action": "disable",
+                    }
+                ).encode(),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"KeyGuard-Session {session}",
+                },
+            )
+            with self.assertRaises(urllib.error.HTTPError) as rejected:
+                urllib.request.urlopen(request)
+            self.assertEqual(422, rejected.exception.code)
+            payload = json.loads(rejected.exception.read())
+            self.assertEqual("PROVIDER_CONFIGURATION_ERROR", payload["error"]["code"])
+            rejected.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_keyring_vault_uses_secret_service_namespace(self) -> None:
         backend = MagicMock()
         vault = KeyringVault(backend)
@@ -380,6 +418,8 @@ class FoundationTests(unittest.TestCase):
         self.assertNotIn("localStorage", script)
         self.assertNotIn("document.cookie", script)
         self.assertNotIn('setItem("api_key"', script)
+        self.assertIn("credential.available_actions.includes(configuredAction)", script)
+        self.assertNotIn('credential.available_actions.join(", ")', script)
 
     def test_api_rejects_non_finite_and_giant_thresholds(self) -> None:
         token = "test-token-that-is-long-enough-123456"

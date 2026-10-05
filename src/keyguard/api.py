@@ -323,15 +323,20 @@ def make_handler(
                         raise ApiError(
                             422, "VALIDATION_ERROR", "Unknown credential field"
                         )
-                    provider, metadata, action = providers.validate_configuration(
-                        _text(body.get("provider"), "provider", maximum=80),
-                        _metadata(body.get("metadata")),
-                        _text(
-                            body.get("protection_action", "notify_only"),
-                            "protection_action",
-                            maximum=40,
-                        ),
-                    )
+                    try:
+                        provider, metadata, action = providers.validate_configuration(
+                            _text(body.get("provider"), "provider", maximum=80),
+                            _metadata(body.get("metadata")),
+                            _text(
+                                body.get("protection_action", "notify_only"),
+                                "protection_action",
+                                maximum=40,
+                            ),
+                        )
+                    except ProviderError as error:
+                        raise ApiError(
+                            422, "PROVIDER_CONFIGURATION_ERROR", str(error)
+                        ) from error
                     secret = _secret(body.get("api_key"))
                     credential = store.create_credential(
                         provider=provider,

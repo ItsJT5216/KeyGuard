@@ -186,6 +186,44 @@ class OpenRouterProtectionTests(unittest.TestCase):
         )
         self.assertEqual(["GET", "GET"], [call[0] for call in transport.calls])
 
+    def test_verification_read_failure_does_not_claim_action_failure(self) -> None:
+        transport = RecordedTransport(
+            [
+                key_payload(usage=6.0),
+                ProviderError("OpenRouter returned HTTP 503"),
+            ]
+        )
+        service = ProtectionService(
+            self.store, ProviderRegistry([OpenRouterAdapter(transport)])
+        )
+        credential = self._credential()
+
+        with self.assertRaisesRegex(ProviderError, "HTTP 503"):
+            service.check(credential["id"])
+
+        self.assertEqual(
+            "critical_pending_verification",
+            self.store.get_credential(credential["id"])["status"],
+        )
+        event = self.store.history(credential["id"])[0]
+        self.assertEqual("usage_verification_failed", event["event_type"])
+        self.assertEqual("failed", event["result"])
+        self.assertEqual(["GET", "GET"], [call[0] for call in transport.calls])
+
+    def test_disabled_provider_key_stays_disabled_after_check(self) -> None:
+        transport = RecordedTransport([key_payload(usage=4.0, disabled=True)])
+        service = ProtectionService(
+            self.store, ProviderRegistry([OpenRouterAdapter(transport)])
+        )
+        credential = self._credential()
+
+        outcome = service.check(credential["id"])
+
+        self.assertFalse(outcome["threshold_crossed"])
+        self.assertEqual(
+            "disabled", self.store.get_credential(credential["id"])["status"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

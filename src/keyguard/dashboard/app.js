@@ -71,6 +71,7 @@ async function removeCredential(id) {
 
 function card(credential) {
   const article = document.createElement("article");
+  const configuredAction = credential.protection_action || "notify_only";
   article.append(
     text("p", credential.provider, "provider"),
     text("h3", credential.name),
@@ -78,9 +79,7 @@ function card(credential) {
     text("p", credential.paused ? "Paused" : credential.status, "status"),
     text(
       "p",
-      credential.available_actions.length
-        ? `Protection: ${credential.available_actions.join(", ")}`
-        : "Protection: notify only",
+      `Protection: ${configuredAction.replaceAll("_", " ")}`,
       "masked",
     ),
   );
@@ -101,7 +100,7 @@ function card(credential) {
 
   const protect = text("button", "Protect now", "danger");
   protect.type = "button";
-  protect.disabled = !credential.available_actions.length;
+  protect.disabled = !credential.available_actions.includes(configuredAction);
   protect.addEventListener("click", () => runAction(credential.id, "protect"));
 
   controls.append(check, pause, protect, remove);

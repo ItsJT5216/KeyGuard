@@ -40,7 +40,12 @@ class ProtectionService:
         threshold = credential["threshold"]
         crossed = threshold is not None and first.used >= threshold
         if not crossed and not force_protect:
-            self.store.set_runtime_status(credential_id, "watching")
+            status = (
+                "disabled"
+                if first.provider_status.get("disabled") is True
+                else "watching"
+            )
+            self.store.set_runtime_status(credential_id, status)
             self.store.record_event(
                 credential_id,
                 "usage_checked",
@@ -77,14 +82,26 @@ class ProtectionService:
                 "action": "notify_only",
             }
 
-        try:
-            verified = (
-                first
-                if force_protect
-                else self._capture(credential_id, secret, adapter, metadata)
-            )
-            if not force_protect and verified.used < threshold:
-                self.store.set_runtime_status(credential_id, "watching")
+        if force_protect:
+            verified = first
+        else:
+            try:
+                verified = self._capture(credential_id, secret, adapter, metadata)
+            except ProviderError:
+                self.store.record_event(
+                    credential_id,
+                    "usage_verification_failed",
+                    "failed",
+                    {"used": first.used, "threshold": threshold, "unit": first.unit},
+                )
+                raise
+            if verified.used < threshold:
+                status = (
+                    "disabled"
+                    if verified.provider_status.get("disabled") is True
+                    else "watching"
+                )
+                self.store.set_runtime_status(credential_id, status)
                 self.store.record_event(
                     credential_id,
                     "protection_cancelled",
@@ -96,6 +113,8 @@ class ProtectionService:
                     "threshold_crossed": False,
                     "verification": "below_threshold",
                 }
+
+        try:
             result = adapter.execute_action(
                 credential["protection_action"], secret, metadata
             )
