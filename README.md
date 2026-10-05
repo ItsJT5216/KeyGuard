@@ -26,7 +26,23 @@ Open the dashboard with:
 keyguard open
 ```
 
-The dashboard may be closed without stopping the daemon. Reopening it reconnects to the same daemon and SQLite state. Adaptive polling and provider protection are added by X-6 and X-7.
+The dashboard may be closed without stopping the daemon. Reopening it reconnects to the same daemon and SQLite state. Adaptive polling is added by X-6; the first provider protection path is described below.
+
+## OpenRouter provider
+
+KeyGuard's first verified adapter uses OpenRouter's documented management-key API. Add the management key as the provider credential and the target API key's 64-character hash as provider metadata. A configured `disable` action performs the full X-7 protection flow: fetch usage, confirm a crossed threshold with a second fresh fetch, disable the key, fetch it again, and report success only when OpenRouter returns `disabled: true`.
+
+- Usage endpoint: `GET /api/v1/keys/{hash}`.
+- Usage scope: the individual OpenRouter API key identified by the hash.
+- Credential: an OpenRouter Management API key with permission to read and update API keys.
+- Units: USD credits; `usage` is the selected key's recorded usage, while `limit`, `limit_remaining`, and `limit_reset` describe its configured cap and reset period.
+- Implemented protection action: reversible key disable through `PATCH /api/v1/keys/{hash}` with `{"disabled": true}`.
+- Verification: a fresh `GET /api/v1/keys/{hash}` must return `disabled: true`.
+- Other documented capabilities: delete key and set its USD limit. They are reported as provider capabilities but are not offered as KeyGuard actions yet.
+- Monitoring limits: HTTP 429 is treated as a failed provider check; KeyGuard never converts it into zero usage. The provider's `Retry-After` policy will be incorporated into X-6 scheduling.
+- Billing lag: OpenRouter does not publish a guaranteed settlement interval. KeyGuard therefore performs a second authoritative read immediately before protection and never treats missing or malformed usage as zero.
+
+The provider adapter tests use recorded response shapes and an injectable transport. They do not require or expose a live management key.
 
 ## Security boundary
 
