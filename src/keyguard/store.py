@@ -48,12 +48,26 @@ class Store:
                     status TEXT NOT NULL DEFAULT 'watching',
                     auto_protect INTEGER NOT NULL DEFAULT 0,
                     threshold REAL,
+                    provider_metadata_json TEXT NOT NULL DEFAULT '{}',
+                    protection_action TEXT NOT NULL DEFAULT 'notify_only',
                     paused INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in self._db.execute("PRAGMA table_info(credentials)").fetchall()
+            }
+            if "provider_metadata_json" not in columns:
+                self._db.execute(
+                    "ALTER TABLE credentials ADD COLUMN provider_metadata_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "protection_action" not in columns:
+                self._db.execute(
+                    "ALTER TABLE credentials ADD COLUMN protection_action TEXT NOT NULL DEFAULT 'notify_only'"
+                )
             self._db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS events (
@@ -129,6 +143,8 @@ class Store:
             "status": row["status"],
             "auto_protect": bool(row["auto_protect"]),
             "threshold": row["threshold"],
+            "provider_metadata": json.loads(row["provider_metadata_json"]),
+            "protection_action": row["protection_action"],
             "paused": bool(row["paused"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -156,6 +172,8 @@ class Store:
         secret: str,
         threshold: float | None,
         auto_protect: bool,
+        provider_metadata: dict[str, Any] | None = None,
+        protection_action: str = "notify_only",
     ) -> dict[str, Any]:
         credential_id = str(uuid.uuid4())
         now = utc_now()
@@ -166,8 +184,9 @@ class Store:
                     """
                     INSERT INTO credentials
                     (id, provider, name, masked_identifier, status, auto_protect,
-                     threshold, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 'provisioning', ?, ?, ?, ?)
+                     threshold, provider_metadata_json, protection_action,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         credential_id,
@@ -176,6 +195,8 @@ class Store:
                         masked,
                         int(auto_protect),
                         threshold,
+                        json.dumps(provider_metadata or {}, separators=(",", ":")),
+                        protection_action,
                         now,
                         now,
                     ),
@@ -246,7 +267,8 @@ class Store:
                         """
                         UPDATE credentials
                         SET provider = ?, name = ?, masked_identifier = ?, threshold = ?,
-                            auto_protect = ?, updated_at = ?
+                            auto_protect = ?, provider_metadata_json = ?,
+                            protection_action = ?, updated_at = ?
                         WHERE id = ?
                         """,
                         (
@@ -257,6 +279,15 @@ class Store:
                             ),
                             values.get("threshold", current["threshold"]),
                             int(values.get("auto_protect", current["auto_protect"])),
+                            json.dumps(
+                                values.get(
+                                    "provider_metadata", current["provider_metadata"]
+                                ),
+                                separators=(",", ":"),
+                            ),
+                            values.get(
+                                "protection_action", current["protection_action"]
+                            ),
                             utc_now(),
                             credential_id,
                         ),
@@ -295,6 +326,58 @@ class Store:
                     self.vault.set(credential_id, old_secret)
                 raise
             return cursor.rowcount > 0
+
+    def get_secret(self, credential_id: str) -> str | None:
+        with self._lock:
+            exists = self._db.execute(
+                "SELECT 1 FROM credentials WHERE id = ?", (credential_id,)
+            ).fetchone()
+            if exists is None:
+                return None
+            return self.vault.get(credential_id)
+
+    def record_usage_snapshot(
+        self, credential_id: str, snapshot: dict[str, Any]
+    ) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                """
+                INSERT INTO usage_snapshots
+                    (credential_id, checked_at, used, configured_limit, remaining,
+                     unit, success, error_code)
+                VALUES (?, ?, ?, ?, ?, ?, 1, NULL)
+                """,
+                (
+                    credential_id,
+                    snapshot["checked_at"],
+                    snapshot["used"],
+                    snapshot.get("limit"),
+                    snapshot.get("remaining"),
+                    snapshot["unit"],
+                ),
+            )
+
+    def usage_history(self, credential_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                """
+                SELECT checked_at, used, configured_limit, remaining, unit, success,
+                       error_code
+                FROM usage_snapshots WHERE credential_id = ? ORDER BY id DESC
+                """,
+                (credential_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_runtime_status(
+        self, credential_id: str, status: str
+    ) -> dict[str, Any] | None:
+        with self._lock, self._db:
+            cursor = self._db.execute(
+                "UPDATE credentials SET status = ?, updated_at = ? WHERE id = ?",
+                (status, utc_now(), credential_id),
+            )
+        return self.get_credential(credential_id) if cursor.rowcount else None
 
     def set_paused(self, credential_id: str, paused: bool) -> dict[str, Any] | None:
         status = "paused" if paused else "watching"

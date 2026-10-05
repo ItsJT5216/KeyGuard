@@ -11,6 +11,9 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .auth import SessionAuthority
+from .protection import ProtectionService
+from .providers import ProviderRegistry
+from .providers.base import ProviderError
 from .store import Store
 
 LOGGER = logging.getLogger("keyguard")
@@ -73,6 +76,16 @@ def _boolean(value: Any, field: str, default: bool = False) -> bool:
     return value
 
 
+def _metadata(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or len(json.dumps(value)) > 4096:
+        raise ApiError(422, "VALIDATION_ERROR", "metadata must be a small object")
+    if any(not isinstance(key, str) for key in value):
+        raise ApiError(422, "VALIDATION_ERROR", "metadata keys must be text")
+    return value
+
+
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -102,7 +115,12 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             self._worker_slots.release()
 
 
-def make_handler(store: Store, authority: SessionAuthority):
+def make_handler(
+    store: Store,
+    authority: SessionAuthority,
+    providers: ProviderRegistry,
+    protection: ProtectionService,
+):
     class Handler(BaseHTTPRequestHandler):
         server_version = "KeyGuard"
         sys_version = ""
@@ -240,14 +258,22 @@ def make_handler(store: Store, authority: SessionAuthority):
                 if segments == ["api", "status"]:
                     self._json(200, {"status": "ok", "service": "keyguard"})
                 elif segments == ["api", "credentials"]:
-                    self._json(200, {"credentials": store.list_credentials()})
+                    self._json(
+                        200,
+                        {
+                            "credentials": [
+                                providers.enrich(item)
+                                for item in store.list_credentials()
+                            ]
+                        },
+                    )
                 elif segments == ["api", "providers"]:
-                    self._json(200, {"providers": store.providers()})
+                    self._json(200, {"providers": providers.list()})
                 elif len(segments) == 3 and segments[:2] == ["api", "credentials"]:
                     credential = store.get_credential(segments[2])
                     if credential is None:
                         raise ApiError(404, "NOT_FOUND", "Credential not found")
-                    self._json(200, {"credential": credential})
+                    self._json(200, {"credential": providers.enrich(credential)})
                 elif (
                     len(segments) == 4
                     and segments[:2] == ["api", "credentials"]
@@ -290,20 +316,38 @@ def make_handler(store: Store, authority: SessionAuthority):
                         "api_key",
                         "threshold",
                         "auto_protect",
+                        "metadata",
+                        "protection_action",
                     }
                     if set(body) - allowed:
                         raise ApiError(
                             422, "VALIDATION_ERROR", "Unknown credential field"
                         )
+                    try:
+                        provider, metadata, action = providers.validate_configuration(
+                            _text(body.get("provider"), "provider", maximum=80),
+                            _metadata(body.get("metadata")),
+                            _text(
+                                body.get("protection_action", "notify_only"),
+                                "protection_action",
+                                maximum=40,
+                            ),
+                        )
+                    except ProviderError as error:
+                        raise ApiError(
+                            422, "PROVIDER_CONFIGURATION_ERROR", str(error)
+                        ) from error
                     secret = _secret(body.get("api_key"))
                     credential = store.create_credential(
-                        provider=_text(body.get("provider"), "provider", maximum=80),
+                        provider=provider,
                         name=_text(body.get("name"), "name"),
                         secret=secret,
                         threshold=_threshold(body.get("threshold")),
                         auto_protect=_boolean(body.get("auto_protect"), "auto_protect"),
+                        provider_metadata=metadata,
+                        protection_action=action,
                     )
-                    self._json(201, {"credential": credential})
+                    self._json(201, {"credential": providers.enrich(credential)})
                     return
                 if len(segments) == 4 and segments[:2] == ["api", "credentials"]:
                     credential_id, action = segments[2], segments[3]
@@ -314,32 +358,20 @@ def make_handler(store: Store, authority: SessionAuthority):
                         self._json(200, {"credential": result})
                         return
                     if action == "check":
-                        event = store.record_event(
-                            credential_id,
-                            "check_requested",
-                            "pending_provider_integration",
-                            {"message": "Provider checks are implemented by X-7"},
-                        )
-                        if event is None:
+                        try:
+                            outcome = protection.check(credential_id)
+                        except KeyError:
                             raise ApiError(404, "NOT_FOUND", "Credential not found")
-                        self._json(202, {"event": event})
+                        self._json(200, outcome)
                         return
                     if action == "protect":
-                        event = store.record_event(
-                            credential_id,
-                            "protection_requested",
-                            "provider_not_configured",
-                            {"message": "Protection actions are implemented by X-7"},
-                        )
-                        if event is None:
+                        try:
+                            outcome = protection.check(
+                                credential_id, force_protect=True
+                            )
+                        except KeyError:
                             raise ApiError(404, "NOT_FOUND", "Credential not found")
-                        self._json(
-                            409,
-                            {
-                                "event": event,
-                                "error": {"code": "PROVIDER_NOT_CONFIGURED"},
-                            },
-                        )
+                        self._json(200, outcome)
                         return
                 if segments == ["api", "notifications", "test"]:
                     raise ApiError(
@@ -348,6 +380,8 @@ def make_handler(store: Store, authority: SessionAuthority):
                 raise ApiError(404, "NOT_FOUND", "Route not found")
             except ApiError as error:
                 self._error(error)
+            except ProviderError as error:
+                self._error(ApiError(502, "PROVIDER_ERROR", str(error)))
             except RuntimeError as error:
                 LOGGER.warning("Credential operation failed: %s", error)
                 self._error(
@@ -366,7 +400,15 @@ def make_handler(store: Store, authority: SessionAuthority):
                 if len(segments) != 3 or segments[:2] != ["api", "credentials"]:
                     raise ApiError(404, "NOT_FOUND", "Route not found")
                 body = self._body()
-                allowed = {"provider", "name", "api_key", "threshold", "auto_protect"}
+                allowed = {
+                    "provider",
+                    "name",
+                    "api_key",
+                    "threshold",
+                    "auto_protect",
+                    "metadata",
+                    "protection_action",
+                }
                 if not body or set(body) - allowed:
                     raise ApiError(422, "VALIDATION_ERROR", "Invalid credential fields")
                 values: dict[str, Any] = {}
@@ -382,12 +424,33 @@ def make_handler(store: Store, authority: SessionAuthority):
                     values["auto_protect"] = _boolean(
                         body["auto_protect"], "auto_protect"
                     )
+                if "metadata" in body:
+                    values["provider_metadata"] = _metadata(body["metadata"])
+                if "protection_action" in body:
+                    values["protection_action"] = _text(
+                        body["protection_action"],
+                        "protection_action",
+                        maximum=40,
+                    )
+                current = store.get_credential(segments[2])
+                if current is None:
+                    raise ApiError(404, "NOT_FOUND", "Credential not found")
+                provider, metadata, action = providers.validate_configuration(
+                    values.get("provider", current["provider"]),
+                    values.get("provider_metadata", current["provider_metadata"]),
+                    values.get("protection_action", current["protection_action"]),
+                )
+                values["provider"] = provider
+                values["provider_metadata"] = metadata
+                values["protection_action"] = action
                 credential = store.update_credential(segments[2], values)
                 if credential is None:
                     raise ApiError(404, "NOT_FOUND", "Credential not found")
-                self._json(200, {"credential": credential})
+                self._json(200, {"credential": providers.enrich(credential)})
             except ApiError as error:
                 self._error(error)
+            except ProviderError as error:
+                self._error(ApiError(422, "PROVIDER_CONFIGURATION_ERROR", str(error)))
             except RuntimeError:
                 self._error(
                     ApiError(
@@ -424,11 +487,16 @@ def make_handler(store: Store, authority: SessionAuthority):
 
 
 def create_server(
-    store: Store, auth_token: str, port: int = 17832
+    store: Store,
+    auth_token: str,
+    port: int = 17832,
+    providers: ProviderRegistry | None = None,
 ) -> BoundedThreadingHTTPServer:
     authority = SessionAuthority(auth_token)
+    registry = providers or ProviderRegistry()
+    protection = ProtectionService(store, registry)
     server = BoundedThreadingHTTPServer(
-        ("127.0.0.1", port), make_handler(store, authority)
+        ("127.0.0.1", port), make_handler(store, authority, registry, protection)
     )
     server.authority = authority
     return server
