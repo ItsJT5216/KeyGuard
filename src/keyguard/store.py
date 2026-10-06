@@ -50,6 +50,7 @@ class Store:
                     threshold REAL,
                     provider_metadata_json TEXT NOT NULL DEFAULT '{}',
                     protection_action TEXT NOT NULL DEFAULT 'notify_only',
+                    polling_config_json TEXT NOT NULL DEFAULT '{}',
                     paused INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -67,6 +68,10 @@ class Store:
             if "protection_action" not in columns:
                 self._db.execute(
                     "ALTER TABLE credentials ADD COLUMN protection_action TEXT NOT NULL DEFAULT 'notify_only'"
+                )
+            if "polling_config_json" not in columns:
+                self._db.execute(
+                    "ALTER TABLE credentials ADD COLUMN polling_config_json TEXT NOT NULL DEFAULT '{}'"
                 )
             self._db.execute(
                 """
@@ -145,6 +150,7 @@ class Store:
             "threshold": row["threshold"],
             "provider_metadata": json.loads(row["provider_metadata_json"]),
             "protection_action": row["protection_action"],
+            "polling_config": json.loads(row["polling_config_json"]),
             "paused": bool(row["paused"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -174,6 +180,7 @@ class Store:
         auto_protect: bool,
         provider_metadata: dict[str, Any] | None = None,
         protection_action: str = "notify_only",
+        polling_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         credential_id = str(uuid.uuid4())
         now = utc_now()
@@ -185,8 +192,9 @@ class Store:
                     INSERT INTO credentials
                     (id, provider, name, masked_identifier, status, auto_protect,
                      threshold, provider_metadata_json, protection_action,
+                     polling_config_json,
                      created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         credential_id,
@@ -197,6 +205,7 @@ class Store:
                         threshold,
                         json.dumps(provider_metadata or {}, separators=(",", ":")),
                         protection_action,
+                        json.dumps(polling_config or {}, separators=(",", ":")),
                         now,
                         now,
                     ),
@@ -268,7 +277,8 @@ class Store:
                         UPDATE credentials
                         SET provider = ?, name = ?, masked_identifier = ?, threshold = ?,
                             auto_protect = ?, provider_metadata_json = ?,
-                            protection_action = ?, updated_at = ?
+                            protection_action = ?, polling_config_json = ?,
+                            updated_at = ?
                         WHERE id = ?
                         """,
                         (
@@ -287,6 +297,10 @@ class Store:
                             ),
                             values.get(
                                 "protection_action", current["protection_action"]
+                            ),
+                            json.dumps(
+                                values.get("polling_config", current["polling_config"]),
+                                separators=(",", ":"),
                             ),
                             utc_now(),
                             credential_id,
@@ -368,6 +382,75 @@ class Store:
                 (credential_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_scheduler_state(self, credential_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM scheduler_state WHERE credential_id = ?",
+                (credential_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_scheduler_state(
+        self,
+        credential_id: str,
+        *,
+        last_check_at: str | None,
+        next_check_at: str | None,
+        current_interval_seconds: int | None,
+        polling_tier: str | None,
+        consecutive_failures: int,
+    ) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                """
+                INSERT INTO scheduler_state
+                    (credential_id, last_check_at, next_check_at,
+                     current_interval_seconds, polling_tier, consecutive_failures)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(credential_id) DO UPDATE SET
+                    last_check_at = excluded.last_check_at,
+                    next_check_at = excluded.next_check_at,
+                    current_interval_seconds = excluded.current_interval_seconds,
+                    polling_tier = excluded.polling_tier,
+                    consecutive_failures = excluded.consecutive_failures
+                """,
+                (
+                    credential_id,
+                    last_check_at,
+                    next_check_at,
+                    current_interval_seconds,
+                    polling_tier,
+                    consecutive_failures,
+                ),
+            )
+
+    def schedule_now(self, credential_id: str) -> None:
+        state = self.get_scheduler_state(credential_id) or {}
+        self.set_scheduler_state(
+            credential_id,
+            last_check_at=state.get("last_check_at"),
+            next_check_at=utc_now(),
+            current_interval_seconds=0,
+            polling_tier="due",
+            consecutive_failures=int(state.get("consecutive_failures", 0)),
+        )
+
+    def due_credentials(self, now: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                """
+                SELECT c.*
+                FROM credentials AS c
+                LEFT JOIN scheduler_state AS s ON s.credential_id = c.id
+                WHERE c.paused = 0
+                  AND c.status NOT IN ('disabled', 'cleanup_required', 'provisioning')
+                  AND (s.next_check_at IS NULL OR s.next_check_at <= ?)
+                ORDER BY COALESCE(s.next_check_at, c.created_at), c.id
+                """,
+                (now,),
+            ).fetchall()
+        return [self._public(row) for row in rows]
 
     def set_runtime_status(
         self, credential_id: str, status: str

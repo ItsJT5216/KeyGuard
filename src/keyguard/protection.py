@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from .providers import ProviderRegistry
@@ -11,6 +12,12 @@ class ProtectionService:
     def __init__(self, store: Store, providers: ProviderRegistry) -> None:
         self.store = store
         self.providers = providers
+        self._credential_locks: dict[str, threading.Lock] = {}
+        self._credential_locks_guard = threading.Lock()
+
+    def _credential_lock(self, credential_id: str) -> threading.Lock:
+        with self._credential_locks_guard:
+            return self._credential_locks.setdefault(credential_id, threading.Lock())
 
     def _capture(
         self, credential_id: str, secret: str, adapter: Any, metadata: dict[str, Any]
@@ -20,6 +27,15 @@ class ProtectionService:
         return snapshot
 
     def check(
+        self, credential_id: str, *, force_protect: bool = False
+    ) -> dict[str, Any]:
+        # A scheduled check and a dashboard request may arrive together. Keep the
+        # full verify-and-act transaction single-flight for each credential so
+        # they cannot race into duplicate provider mutations.
+        with self._credential_lock(credential_id):
+            return self._check(credential_id, force_protect=force_protect)
+
+    def _check(
         self, credential_id: str, *, force_protect: bool = False
     ) -> dict[str, Any]:
         credential = self.store.get_credential(credential_id)

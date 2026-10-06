@@ -2,12 +2,13 @@
 
 KeyGuard is a local-first Ubuntu daemon for tracking API-provider credentials without exposing stored secrets to its browser dashboard.
 
-This first foundation implements [Linear X-5](https://linear.app/itstanner5216/issue/X-5/1-build-keyguard-foundation-daemon-vault-sqlite-localhost-dashboard):
+The current implementation includes the [X-5 foundation](https://linear.app/itstanner5216/issue/X-5/1-build-keyguard-foundation-daemon-vault-sqlite-localhost-dashboard), the [X-7 OpenRouter protection path](https://linear.app/itstanner5216/issue/X-7/2-define-provider-adapter-contract-and-ship-first-verified-protection), and the [X-6 adaptive scheduler](https://linear.app/itstanner5216/issue/X-6/3-implement-adaptive-polling-and-burn-rate-escalation):
 
 - a loopback-only Python HTTP daemon;
 - GNOME Keyring storage through `keyring`, with no plaintext fallback;
 - SQLite storage for non-secret credential configuration, usage snapshots, scheduler state, and event history;
 - a daemon-served HTML dashboard backed by the real API;
+- persisted distance- and burn-rate-driven polling with bounded jitter;
 - a user-service installer and desktop launcher.
 
 ## Install for the current user
@@ -26,7 +27,15 @@ Open the dashboard with:
 keyguard open
 ```
 
-The dashboard may be closed without stopping the daemon. Reopening it reconnects to the same daemon and SQLite state. Adaptive polling is added by X-6; the first provider protection path is described below.
+The dashboard may be closed without stopping the daemon. Reopening it reconnects to the same daemon and SQLite state.
+
+## Adaptive polling
+
+The daemon schedules each active credential from real successful usage snapshots. Default distance tiers are four hours when usage is more than 10 units from the configured threshold, then one hour, 15 minutes, five minutes, and one minute as the remaining distance crosses 10, 5, 2, and 0.5 units. The same model works for USD, credits, tokens, characters, requests, or another adapter unit.
+
+Each credential can override its distance boundaries, intervals, safety margin, and non-critical jitter through the API's `polling` object. Recent successful snapshots also produce a burn-rate estimate. When projected time to the threshold is shorter than the distance-selected interval plus its safety margin, KeyGuard moves to a faster tier before distance alone would require it.
+
+Polling tier, current interval, next check, last check, and consecutive failures live in SQLite. Overdue work runs promptly after daemon restart. Provider failures create no zero-usage snapshot and use bounded retry scheduling instead. Paused, disabled, provisioning, and cleanup-required credentials are not polled.
 
 ## OpenRouter provider
 
@@ -39,7 +48,7 @@ KeyGuard's first verified adapter uses OpenRouter's documented management-key AP
 - Implemented protection action: reversible key disable through `PATCH /api/v1/keys/{hash}` with `{"disabled": true}`.
 - Verification: a fresh `GET /api/v1/keys/{hash}` must return `disabled: true`.
 - Other documented capabilities: delete key and set its USD limit. They are reported as provider capabilities but are not offered as KeyGuard actions yet.
-- Monitoring limits: HTTP 429 is treated as a failed provider check; KeyGuard never converts it into zero usage. The provider's `Retry-After` policy will be incorporated into X-6 scheduling.
+- Monitoring limits: HTTP 429 is treated as a failed provider check; KeyGuard never converts it into zero usage. Adaptive polling uses a bounded error-retry schedule without recording a false zero balance.
 - Billing lag: OpenRouter does not publish a guaranteed settlement interval. KeyGuard therefore performs a second authoritative read immediately before protection and never treats missing or malformed usage as zero.
 
 The provider adapter tests use recorded response shapes and an injectable transport. They do not require or expose a live management key.
