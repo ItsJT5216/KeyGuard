@@ -74,6 +74,7 @@ class OpenRouterTransport:
             with self._opener.open(request, timeout=20) as response:
                 payload = json.loads(response.read())
         except urllib.error.HTTPError as error:
+            error.close()
             raise ProviderError(f"OpenRouter returned HTTP {error.code}") from error
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ProviderError("OpenRouter response was unavailable") from error
