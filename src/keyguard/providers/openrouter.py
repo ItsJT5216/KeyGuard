@@ -33,7 +33,25 @@ class Transport(Protocol):
         pass
 
 
+class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep the management credential on the configured provider origin."""
+
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        file_pointer: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> None:
+        return None
+
+
 class OpenRouterTransport:
+    def __init__(self, opener: urllib.request.OpenerDirector | None = None) -> None:
+        self._opener = opener or urllib.request.build_opener(_RejectRedirectHandler())
+
     def request(
         self,
         method: str,
@@ -53,9 +71,10 @@ class OpenRouterTransport:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
+            with self._opener.open(request, timeout=20) as response:
                 payload = json.loads(response.read())
         except urllib.error.HTTPError as error:
+            error.close()
             raise ProviderError(f"OpenRouter returned HTTP {error.code}") from error
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ProviderError("OpenRouter response was unavailable") from error

@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from keyguard.protection import ProtectionService
 from keyguard.providers import ProviderRegistry
+from keyguard.providers import openrouter as openrouter_module
 from keyguard.providers.base import (
     CAN_DISABLE_KEY,
     CAN_FETCH_USAGE,
     CAN_IDENTIFY_INDIVIDUAL_KEY_USAGE,
     ProviderError,
 )
-from keyguard.providers.openrouter import OpenRouterAdapter
+from keyguard.providers.openrouter import OpenRouterAdapter, OpenRouterTransport
 from keyguard.store import Store
 
 
@@ -66,6 +70,64 @@ def key_payload(
 
 
 class OpenRouterAdapterTests(unittest.TestCase):
+    def test_transport_rejects_redirect_without_forwarding_authorization(self) -> None:
+        redirected_requests: list[str | None] = []
+        initial_authorization: list[str | None] = []
+
+        class DestinationHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                redirected_requests.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"data": {}}')
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        destination = ThreadingHTTPServer(("127.0.0.1", 0), DestinationHandler)
+        destination_url = f"http://127.0.0.1:{destination.server_port}/capture"
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                initial_authorization.append(self.headers.get("Authorization"))
+                self.send_response(302)
+                self.send_header("Location", destination_url)
+                self.end_headers()
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        redirect = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        threads = [
+            threading.Thread(target=destination.serve_forever, daemon=True),
+            threading.Thread(target=redirect.serve_forever, daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+
+        try:
+            with (
+                patch.object(
+                    openrouter_module,
+                    "BASE_URL",
+                    f"http://127.0.0.1:{redirect.server_port}",
+                ),
+                self.assertRaisesRegex(ProviderError, "HTTP 302"),
+            ):
+                OpenRouterTransport().request(
+                    "GET", "/keys/example", "management-secret"
+                )
+        finally:
+            redirect.shutdown()
+            destination.shutdown()
+            redirect.server_close()
+            destination.server_close()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(["Bearer management-secret"], initial_authorization)
+        self.assertEqual([], redirected_requests)
+
     def test_parses_individual_key_usage_without_losing_scope(self) -> None:
         transport = RecordedTransport([key_payload(usage=6.25)])
         adapter = OpenRouterAdapter(transport)
