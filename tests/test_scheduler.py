@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -34,11 +36,35 @@ class FakeProtection:
         self.outcome = outcome
         self.calls: list[str] = []
 
-    def check(self, credential_id: str) -> dict[str, Any]:
+    @contextmanager
+    def credential_operation(self, credential_id: str):
+        yield
+
+    def check(self, credential_id: str, *, scheduled: bool = False) -> dict[str, Any]:
         self.calls.append(credential_id)
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
+
+
+class ConcurrentProtection(FakeProtection):
+    def __init__(self) -> None:
+        super().__init__({})
+        self.barrier = threading.Barrier(2)
+        self.state_lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def check(self, credential_id: str, *, scheduled: bool = False) -> dict[str, Any]:
+        with self.state_lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            self.barrier.wait(timeout=2)
+            return {"snapshot": snapshot(datetime.now(UTC), 1.0)}
+        finally:
+            with self.state_lock:
+                self.active -= 1
 
 
 def snapshot(checked_at: datetime, used: float) -> dict[str, Any]:
@@ -206,6 +232,96 @@ class AdaptiveSchedulerTests(unittest.TestCase):
         self.assertEqual(1, state["consecutive_failures"])
         self.assertGreater(self.scheduler_time(state["next_check_at"]), now)
 
+    def test_provider_failure_uses_bounded_exponential_backoff(self) -> None:
+        credential = self.credential()
+        scheduler, _ = self.scheduler(ProviderError("provider unavailable"))
+        start = datetime.now(UTC) + timedelta(seconds=1)
+        scheduler.schedule_now(credential["id"])
+
+        expected = (60, 120, 240, 480, 900, 900)
+        current = start
+        for failure_count, delay in enumerate(expected, start=1):
+            self.assertEqual(1, scheduler.run_due_once(now=current))
+            state = self.store.get_scheduler_state(credential["id"])
+            self.assertEqual(failure_count, state["consecutive_failures"])
+            actual_delay = (
+                self.scheduler_time(state["next_check_at"]) - current
+            ).total_seconds()
+            self.assertEqual(delay, actual_delay)
+            current = self.scheduler_time(state["next_check_at"]) + timedelta(seconds=1)
+
+    def test_vault_runtime_failure_is_retried_without_stopping_other_checks(
+        self,
+    ) -> None:
+        first = self.credential()
+        second = self.credential()
+
+        class MixedProtection(FakeProtection):
+            def check(
+                self, credential_id: str, *, scheduled: bool = False
+            ) -> dict[str, Any]:
+                self.calls.append(credential_id)
+                if credential_id == first["id"]:
+                    raise RuntimeError("Secret Service unavailable")
+                return {"snapshot": snapshot(datetime.now(UTC), 1.0)}
+
+        protection = MixedProtection({})
+        scheduler = AdaptiveScheduler(
+            self.store, protection, jitter=lambda _low, _high: 0
+        )
+        scheduler.schedule_now(first["id"])
+        scheduler.schedule_now(second["id"])
+
+        self.assertEqual(2, scheduler.run_due_once(now=datetime.now(UTC)))
+        self.assertEqual(
+            "error_retry",
+            self.store.get_scheduler_state(first["id"])["polling_tier"],
+        )
+        self.assertEqual(
+            "quiet",
+            self.store.get_scheduler_state(second["id"])["polling_tier"],
+        )
+
+    def test_due_credentials_are_checked_concurrently(self) -> None:
+        first = self.credential()
+        second = self.credential()
+        protection = ConcurrentProtection()
+        scheduler = AdaptiveScheduler(
+            self.store, protection, jitter=lambda _low, _high: 0
+        )
+        scheduler.schedule_now(first["id"])
+        scheduler.schedule_now(second["id"])
+
+        self.assertEqual(2, scheduler.run_due_once(now=datetime.now(UTC)))
+        self.assertEqual(2, protection.max_active)
+
+    def test_runner_wait_tracks_the_next_persisted_deadline(self) -> None:
+        credential = self.credential(
+            polling=normalize_polling_config(
+                {
+                    "quiet_interval_seconds": 2,
+                    "watch_interval_seconds": 2,
+                    "accelerated_interval_seconds": 2,
+                    "critical_interval_seconds": 2,
+                    "urgent_interval_seconds": 1,
+                }
+            )
+        )
+        scheduler, _ = self.scheduler()
+        now = datetime.now(UTC)
+        self.store.set_scheduler_state(
+            credential["id"],
+            last_check_at=now.isoformat(),
+            next_check_at=(now + timedelta(seconds=1)).isoformat(),
+            current_interval_seconds=1,
+            polling_tier="urgent",
+            consecutive_failures=0,
+        )
+
+        self.assertAlmostEqual(
+            1.0, scheduler.seconds_until_next_check(now=now), places=2
+        )
+
     def test_paused_and_disabled_credentials_are_not_scheduled(self) -> None:
         paused = self.credential()
         disabled = self.credential()
@@ -218,6 +334,20 @@ class AdaptiveSchedulerTests(unittest.TestCase):
         self.assertEqual(0, scheduler.run_due_once())
         self.assertEqual([], protection.calls)
 
+    def test_queued_check_revalidates_disabled_state_before_provider_call(self) -> None:
+        credential = self.credential()
+        scheduler, protection = self.scheduler(
+            {"snapshot": snapshot(datetime.now(UTC), 1.0)}
+        )
+        scheduler.schedule_now(credential["id"])
+        queued = self.store.due_credentials(
+            (datetime.now(UTC) + timedelta(seconds=1)).isoformat()
+        )[0]
+        self.store.set_runtime_status(credential["id"], "disabled")
+
+        self.assertEqual(0, scheduler._process_credential(queued, datetime.now(UTC)))
+        self.assertEqual([], protection.calls)
+
     @staticmethod
     def scheduler_time(value: str) -> datetime:
         return datetime.fromisoformat(value)
@@ -225,3 +355,4 @@ class AdaptiveSchedulerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

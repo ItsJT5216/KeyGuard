@@ -3,18 +3,21 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from keyguard.protection import ProtectionService
 from keyguard.providers import ProviderRegistry
+from keyguard.providers import openrouter as openrouter_module
 from keyguard.providers.base import (
     CAN_DISABLE_KEY,
     CAN_FETCH_USAGE,
     CAN_IDENTIFY_INDIVIDUAL_KEY_USAGE,
     ProviderError,
 )
-from keyguard.providers.openrouter import OpenRouterAdapter
+from keyguard.providers.openrouter import OpenRouterAdapter, OpenRouterTransport
 from keyguard.store import Store
 
 
@@ -86,6 +89,64 @@ def key_payload(
 
 
 class OpenRouterAdapterTests(unittest.TestCase):
+    def test_transport_rejects_redirect_without_forwarding_authorization(self) -> None:
+        redirected_requests: list[str | None] = []
+        initial_authorization: list[str | None] = []
+
+        class DestinationHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                redirected_requests.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"data": {}}')
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        destination = ThreadingHTTPServer(("127.0.0.1", 0), DestinationHandler)
+        destination_url = f"http://127.0.0.1:{destination.server_port}/capture"
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                initial_authorization.append(self.headers.get("Authorization"))
+                self.send_response(302)
+                self.send_header("Location", destination_url)
+                self.end_headers()
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        redirect = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        threads = [
+            threading.Thread(target=destination.serve_forever, daemon=True),
+            threading.Thread(target=redirect.serve_forever, daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+
+        try:
+            with (
+                patch.object(
+                    openrouter_module,
+                    "BASE_URL",
+                    f"http://127.0.0.1:{redirect.server_port}",
+                ),
+                self.assertRaisesRegex(ProviderError, "HTTP 302"),
+            ):
+                OpenRouterTransport().request(
+                    "GET", "/keys/example", "management-secret"
+                )
+        finally:
+            redirect.shutdown()
+            destination.shutdown()
+            redirect.server_close()
+            destination.server_close()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(["Bearer management-secret"], initial_authorization)
+        self.assertEqual([], redirected_requests)
+
     def test_parses_individual_key_usage_without_losing_scope(self) -> None:
         transport = RecordedTransport([key_payload(usage=6.25)])
         adapter = OpenRouterAdapter(transport)
@@ -244,8 +305,16 @@ class OpenRouterProtectionTests(unittest.TestCase):
             "disabled", self.store.get_credential(credential["id"])["status"]
         )
 
-    def test_manual_and_scheduled_checks_are_single_flight_per_credential(self) -> None:
-        transport = BlockingTransport([key_payload(usage=4.0), key_payload(usage=4.1)])
+    def test_overlapping_protection_requests_execute_one_provider_mutation(
+        self,
+    ) -> None:
+        transport = BlockingTransport(
+            [
+                key_payload(usage=6.0),
+                {"data": {"disabled": True}},
+                key_payload(usage=6.0, disabled=True),
+            ]
+        )
         service = ProtectionService(
             self.store, ProviderRegistry([OpenRouterAdapter(transport)])
         )
@@ -253,10 +322,14 @@ class OpenRouterProtectionTests(unittest.TestCase):
         results: list[dict[str, Any]] = []
 
         first = threading.Thread(
-            target=lambda: results.append(service.check(credential["id"]))
+            target=lambda: results.append(
+                service.check(credential["id"], force_protect=True)
+            )
         )
         second = threading.Thread(
-            target=lambda: results.append(service.check(credential["id"]))
+            target=lambda: results.append(
+                service.check(credential["id"], force_protect=True)
+            )
         )
         first.start()
         self.assertTrue(transport.first_call_started.wait(timeout=1))
@@ -270,7 +343,44 @@ class OpenRouterProtectionTests(unittest.TestCase):
         self.assertFalse(first.is_alive())
         self.assertFalse(second.is_alive())
         self.assertEqual(2, len(results))
-        self.assertEqual(2, len(transport.calls))
+        self.assertEqual(1, [call[0] for call in transport.calls].count("PATCH"))
+        self.assertEqual(3, len(transport.calls))
+        self.assertTrue(
+            any(result["action"] == "already_disabled" for result in results)
+        )
+
+    def test_credential_mutation_waits_for_in_flight_check(self) -> None:
+        transport = BlockingTransport([key_payload(usage=4.0)])
+        service = ProtectionService(
+            self.store, ProviderRegistry([OpenRouterAdapter(transport)])
+        )
+        credential = self._credential()
+        mutation_started = threading.Event()
+        mutation_finished = threading.Event()
+
+        check = threading.Thread(target=lambda: service.check(credential["id"]))
+
+        def pause_credential() -> None:
+            mutation_started.set()
+            with service.credential_operation(credential["id"]):
+                self.store.set_paused(credential["id"], True)
+            mutation_finished.set()
+
+        mutation = threading.Thread(target=pause_credential)
+        check.start()
+        self.assertTrue(transport.first_call_started.wait(timeout=1))
+        mutation.start()
+        self.assertTrue(mutation_started.wait(timeout=1))
+        self.assertFalse(mutation_finished.wait(timeout=0.05))
+
+        transport.release_first_call.set()
+        check.join(timeout=2)
+        mutation.join(timeout=2)
+
+        self.assertFalse(check.is_alive())
+        self.assertFalse(mutation.is_alive())
+        self.assertTrue(mutation_finished.is_set())
+        self.assertTrue(self.store.get_credential(credential["id"])["paused"])
 
 
 if __name__ == "__main__":

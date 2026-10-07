@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import math
 import random
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
@@ -12,6 +14,9 @@ from typing import Any
 from .protection import ProtectionService
 from .providers.base import ProviderError
 from .store import Store
+
+LOGGER = logging.getLogger("keyguard.scheduler")
+MAX_CONCURRENT_CHECKS = 4
 
 DEFAULT_POLLING_CONFIG: dict[str, float] = {
     "quiet_distance": 10.0,
@@ -142,7 +147,6 @@ class AdaptiveScheduler:
         if threshold is None:
             tier = "quiet"
             interval = int(config["quiet_interval_seconds"])
-            distance = math.inf
         else:
             distance = max(float(threshold) - float(snapshot["used"]), 0.0)
             tier, interval = self._distance_plan(distance, config)
@@ -239,17 +243,16 @@ class AdaptiveScheduler:
     def wake(self) -> None:
         self._wake.set()
 
+    def prepare_wait(self) -> None:
+        self._wake.clear()
+
     def wait(self, timeout: float) -> None:
         self._wake.wait(timeout=timeout)
-        self._wake.clear()
 
     def _schedule_failure(self, credential_id: str, now: datetime) -> None:
         state = self.store.get_scheduler_state(credential_id) or {}
         failures = int(state.get("consecutive_failures", 0)) + 1
-        previous_interval = state.get("current_interval_seconds")
         retry = min(60 * (2 ** min(failures - 1, 4)), 15 * 60)
-        if isinstance(previous_interval, int) and previous_interval > 0:
-            retry = min(retry, previous_interval)
         self.store.set_scheduler_state(
             credential_id,
             last_check_at=state.get("last_check_at"),
@@ -259,23 +262,53 @@ class AdaptiveScheduler:
             consecutive_failures=failures,
         )
 
+    def _process_credential(self, credential: dict[str, Any], current: datetime) -> int:
+        credential_id = credential["id"]
+        with self.protection.credential_operation(credential_id):
+            latest = self.store.get_credential(credential_id)
+            if (
+                latest is None
+                or latest["paused"]
+                or latest["status"]
+                in {
+                    "disabled",
+                    "cleanup_required",
+                    "provisioning",
+                }
+            ):
+                return 0
+            try:
+                outcome = self.protection.check(credential_id, scheduled=True)
+            except (ProviderError, RuntimeError):
+                self._schedule_failure(credential_id, current)
+            except KeyError:
+                return 0
+            else:
+                self.schedule_outcome(credential_id, outcome)
+        return 1
+
     def run_due_once(self, *, now: datetime | None = None) -> int:
         current = now or datetime.now(UTC)
-        processed = 0
-        for credential in self.store.due_credentials(current.isoformat()):
-            latest = self.store.get_credential(credential["id"])
-            if latest is None or latest["paused"]:
-                continue
-            processed += 1
-            try:
-                outcome = self.protection.check(credential["id"])
-            except ProviderError:
-                self._schedule_failure(credential["id"], current)
-            except KeyError:
-                continue
-            else:
-                self.schedule_outcome(credential["id"], outcome)
-        return processed
+        due = self.store.due_credentials(current.isoformat())
+        if not due:
+            return 0
+        workers = min(MAX_CONCURRENT_CHECKS, len(due))
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="keyguard-check"
+        ) as executor:
+            futures = [
+                executor.submit(self._process_credential, credential, current)
+                for credential in due
+            ]
+            return sum(future.result() for future in futures)
+
+    def seconds_until_next_check(self, *, now: datetime | None = None) -> float:
+        next_check = self.store.next_scheduled_check()
+        if next_check is None:
+            return 30.0
+        current = now or datetime.now(UTC)
+        remaining = (self._time(next_check) - current).total_seconds()
+        return min(30.0, max(0.05, remaining))
 
 
 class SchedulerRunner(threading.Thread):
@@ -290,5 +323,13 @@ class SchedulerRunner(threading.Thread):
 
     def run(self) -> None:
         while not self._stopped.is_set():
-            self.scheduler.run_due_once()
-            self.scheduler.wait(timeout=30)
+            try:
+                self.scheduler.run_due_once()
+                self.scheduler.prepare_wait()
+                timeout = self.scheduler.seconds_until_next_check()
+            except Exception:
+                LOGGER.exception("Scheduler iteration failed")
+                timeout = 30.0
+            if not self._stopped.is_set():
+                self.scheduler.wait(timeout=timeout)
+

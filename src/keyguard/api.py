@@ -371,31 +371,34 @@ def make_handler(
                 if len(segments) == 4 and segments[:2] == ["api", "credentials"]:
                     credential_id, action = segments[2], segments[3]
                     if action in {"pause", "resume"}:
-                        result = store.set_paused(credential_id, action == "pause")
-                        if result is None:
-                            raise ApiError(404, "NOT_FOUND", "Credential not found")
-                        if action == "resume":
-                            scheduler.schedule_now(credential_id)
+                        with protection.credential_operation(credential_id):
+                            result = store.set_paused(credential_id, action == "pause")
+                            if result is None:
+                                raise ApiError(404, "NOT_FOUND", "Credential not found")
+                            if action == "resume":
+                                scheduler.schedule_now(credential_id)
                         self._json(
                             200, {"credential": self._credential_payload(result)}
                         )
                         return
                     if action == "check":
                         try:
-                            outcome = protection.check(credential_id)
+                            with protection.credential_operation(credential_id):
+                                outcome = protection.check(credential_id)
+                                scheduler.schedule_outcome(credential_id, outcome)
                         except KeyError:
                             raise ApiError(404, "NOT_FOUND", "Credential not found")
-                        scheduler.schedule_outcome(credential_id, outcome)
                         self._json(200, outcome)
                         return
                     if action == "protect":
                         try:
-                            outcome = protection.check(
-                                credential_id, force_protect=True
-                            )
+                            with protection.credential_operation(credential_id):
+                                outcome = protection.check(
+                                    credential_id, force_protect=True
+                                )
+                                scheduler.schedule_outcome(credential_id, outcome)
                         except KeyError:
                             raise ApiError(404, "NOT_FOUND", "Credential not found")
-                        scheduler.schedule_outcome(credential_id, outcome)
                         self._json(200, outcome)
                         return
                 if segments == ["api", "notifications", "test"]:
@@ -462,21 +465,23 @@ def make_handler(
                     )
                 if "polling" in body:
                     values["polling_config"] = normalize_polling_config(body["polling"])
-                current = store.get_credential(segments[2])
-                if current is None:
-                    raise ApiError(404, "NOT_FOUND", "Credential not found")
-                provider, metadata, action = providers.validate_configuration(
-                    values.get("provider", current["provider"]),
-                    values.get("provider_metadata", current["provider_metadata"]),
-                    values.get("protection_action", current["protection_action"]),
-                )
-                values["provider"] = provider
-                values["provider_metadata"] = metadata
-                values["protection_action"] = action
-                credential = store.update_credential(segments[2], values)
-                if credential is None:
-                    raise ApiError(404, "NOT_FOUND", "Credential not found")
-                scheduler.schedule_now(segments[2])
+                credential_id = segments[2]
+                with protection.credential_operation(credential_id):
+                    current = store.get_credential(credential_id)
+                    if current is None:
+                        raise ApiError(404, "NOT_FOUND", "Credential not found")
+                    provider, metadata, action = providers.validate_configuration(
+                        values.get("provider", current["provider"]),
+                        values.get("provider_metadata", current["provider_metadata"]),
+                        values.get("protection_action", current["protection_action"]),
+                    )
+                    values["provider"] = provider
+                    values["provider_metadata"] = metadata
+                    values["protection_action"] = action
+                    credential = store.update_credential(credential_id, values)
+                    if credential is None:
+                        raise ApiError(404, "NOT_FOUND", "Credential not found")
+                    scheduler.schedule_now(credential_id)
                 self._json(200, {"credential": self._credential_payload(credential)})
             except ApiError as error:
                 self._error(error)
@@ -501,8 +506,10 @@ def make_handler(
                 segments = self._segments(self.path)
                 if len(segments) != 3 or segments[:2] != ["api", "credentials"]:
                     raise ApiError(404, "NOT_FOUND", "Route not found")
-                if not store.delete_credential(segments[2]):
-                    raise ApiError(404, "NOT_FOUND", "Credential not found")
+                credential_id = segments[2]
+                with protection.credential_operation(credential_id):
+                    if not store.delete_credential(credential_id):
+                        raise ApiError(404, "NOT_FOUND", "Credential not found")
                 self._empty()
             except ApiError as error:
                 self._error(error)
@@ -538,3 +545,4 @@ def create_server(
     server.scheduler = scheduler
     server.scheduler_runner = scheduler_runner
     return server
+

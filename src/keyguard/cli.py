@@ -77,7 +77,7 @@ def serve() -> None:
         pass
     finally:
         server.scheduler_runner.stop()
-        server.scheduler_runner.join(timeout=2)
+        server.scheduler_runner.join()
         server.server_close()
         store.close()
 
@@ -210,3 +210,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

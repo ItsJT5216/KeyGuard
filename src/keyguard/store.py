@@ -452,6 +452,20 @@ class Store:
             ).fetchall()
         return [self._public(row) for row in rows]
 
+    def next_scheduled_check(self) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                """
+                SELECT MIN(s.next_check_at) AS next_check_at
+                FROM scheduler_state AS s
+                JOIN credentials AS c ON c.id = s.credential_id
+                WHERE c.paused = 0
+                  AND c.status NOT IN ('disabled', 'cleanup_required', 'provisioning')
+                  AND s.next_check_at IS NOT NULL
+                """
+            ).fetchone()
+        return row["next_check_at"] if row else None
+
     def set_runtime_status(
         self, credential_id: str, status: str
     ) -> dict[str, Any] | None:
@@ -554,3 +568,4 @@ class Store:
                 "SELECT DISTINCT provider FROM credentials ORDER BY provider COLLATE NOCASE"
             ).fetchall()
         return [{"id": row["provider"], "capabilities": []} for row in rows]
+
