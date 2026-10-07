@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from .providers import ProviderRegistry
@@ -8,9 +11,21 @@ from .store import Store
 
 
 class ProtectionService:
+    _LOCK_STRIPES = 64
+
     def __init__(self, store: Store, providers: ProviderRegistry) -> None:
         self.store = store
         self.providers = providers
+        self._credential_locks = tuple(
+            threading.RLock() for _ in range(self._LOCK_STRIPES)
+        )
+
+    @contextmanager
+    def credential_operation(self, credential_id: str) -> Iterator[None]:
+        """Serialize checks and mutations without retaining credential IDs forever."""
+        lock = self._credential_locks[hash(credential_id) % self._LOCK_STRIPES]
+        with lock:
+            yield
 
     def _capture(
         self, credential_id: str, secret: str, adapter: Any, metadata: dict[str, Any]
@@ -20,11 +35,36 @@ class ProtectionService:
         return snapshot
 
     def check(
-        self, credential_id: str, *, force_protect: bool = False
+        self,
+        credential_id: str,
+        *,
+        force_protect: bool = False,
+        scheduled: bool = False,
+    ) -> dict[str, Any]:
+        with self.credential_operation(credential_id):
+            return self._check(
+                credential_id,
+                force_protect=force_protect,
+                scheduled=scheduled,
+            )
+
+    def _check(
+        self,
+        credential_id: str,
+        *,
+        force_protect: bool = False,
+        scheduled: bool = False,
     ) -> dict[str, Any]:
         credential = self.store.get_credential(credential_id)
         if credential is None:
             raise KeyError(credential_id)
+        if scheduled and (
+            credential["paused"]
+            or credential["status"] in {"disabled", "cleanup_required", "provisioning"}
+        ):
+            return {"threshold_crossed": False, "skipped": credential["status"]}
+        if force_protect and credential["status"] == "disabled":
+            return {"threshold_crossed": True, "action": "already_disabled"}
         adapter = self.providers.get(credential["provider"])
         secret = self.store.get_secret(credential_id)
         if secret is None:
@@ -38,6 +78,13 @@ class ProtectionService:
             raise
 
         threshold = credential["threshold"]
+        if first.provider_status.get("disabled") is True:
+            self.store.set_runtime_status(credential_id, "disabled")
+            return {
+                "snapshot": first.as_dict(),
+                "threshold_crossed": threshold is not None and first.used >= threshold,
+                "action": "already_disabled",
+            }
         crossed = threshold is not None and first.used >= threshold
         if not crossed and not force_protect:
             status = (
@@ -114,6 +161,22 @@ class ProtectionService:
                     "verification": "below_threshold",
                 }
 
+        latest = self.store.get_credential(credential_id)
+        if latest is None:
+            raise KeyError(credential_id)
+        if latest["paused"] and not force_protect:
+            return {
+                "snapshot": verified.as_dict(),
+                "threshold_crossed": True,
+                "action": "paused",
+            }
+        if latest["status"] == "disabled":
+            return {
+                "snapshot": verified.as_dict(),
+                "threshold_crossed": True,
+                "action": "already_disabled",
+            }
+
         try:
             result = adapter.execute_action(
                 credential["protection_action"], secret, metadata
@@ -140,3 +203,4 @@ class ProtectionService:
             "threshold_crossed": True,
             "action": result,
         }
+

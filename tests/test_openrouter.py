@@ -54,6 +54,25 @@ class RecordedTransport:
         return response
 
 
+class BlockingTransport(RecordedTransport):
+    def __init__(self, responses: list[dict[str, Any] | Exception]) -> None:
+        super().__init__(responses)
+        self.first_call_started = threading.Event()
+        self.release_first_call = threading.Event()
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        token: str,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not self.calls:
+            self.first_call_started.set()
+            self.release_first_call.wait(timeout=2)
+        return super().request(method, path, token, body)
+
+
 def key_payload(
     *, usage: float, disabled: bool = False, limit: float = 20.0
 ) -> dict[str, Any]:
@@ -285,6 +304,83 @@ class OpenRouterProtectionTests(unittest.TestCase):
         self.assertEqual(
             "disabled", self.store.get_credential(credential["id"])["status"]
         )
+
+    def test_overlapping_protection_requests_execute_one_provider_mutation(
+        self,
+    ) -> None:
+        transport = BlockingTransport(
+            [
+                key_payload(usage=6.0),
+                {"data": {"disabled": True}},
+                key_payload(usage=6.0, disabled=True),
+            ]
+        )
+        service = ProtectionService(
+            self.store, ProviderRegistry([OpenRouterAdapter(transport)])
+        )
+        credential = self._credential()
+        results: list[dict[str, Any]] = []
+
+        first = threading.Thread(
+            target=lambda: results.append(
+                service.check(credential["id"], force_protect=True)
+            )
+        )
+        second = threading.Thread(
+            target=lambda: results.append(
+                service.check(credential["id"], force_protect=True)
+            )
+        )
+        first.start()
+        self.assertTrue(transport.first_call_started.wait(timeout=1))
+        second.start()
+
+        self.assertEqual(0, len(transport.calls))
+        transport.release_first_call.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(2, len(results))
+        self.assertEqual(1, [call[0] for call in transport.calls].count("PATCH"))
+        self.assertEqual(3, len(transport.calls))
+        self.assertTrue(
+            any(result["action"] == "already_disabled" for result in results)
+        )
+
+    def test_credential_mutation_waits_for_in_flight_check(self) -> None:
+        transport = BlockingTransport([key_payload(usage=4.0)])
+        service = ProtectionService(
+            self.store, ProviderRegistry([OpenRouterAdapter(transport)])
+        )
+        credential = self._credential()
+        mutation_started = threading.Event()
+        mutation_finished = threading.Event()
+
+        check = threading.Thread(target=lambda: service.check(credential["id"]))
+
+        def pause_credential() -> None:
+            mutation_started.set()
+            with service.credential_operation(credential["id"]):
+                self.store.set_paused(credential["id"], True)
+            mutation_finished.set()
+
+        mutation = threading.Thread(target=pause_credential)
+        check.start()
+        self.assertTrue(transport.first_call_started.wait(timeout=1))
+        mutation.start()
+        self.assertTrue(mutation_started.wait(timeout=1))
+        self.assertFalse(mutation_finished.wait(timeout=0.05))
+
+        transport.release_first_call.set()
+        check.join(timeout=2)
+        mutation.join(timeout=2)
+
+        self.assertFalse(check.is_alive())
+        self.assertFalse(mutation.is_alive())
+        self.assertTrue(mutation_finished.is_set())
+        self.assertTrue(self.store.get_credential(credential["id"])["paused"])
 
 
 if __name__ == "__main__":

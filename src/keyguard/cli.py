@@ -70,11 +70,14 @@ def serve() -> None:
     logging.getLogger("keyguard").info(
         "KeyGuard listening on 127.0.0.1:%s", server.server_port
     )
+    server.scheduler_runner.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        server.scheduler_runner.stop()
+        server.scheduler_runner.join()
         server.server_close()
         store.close()
 
@@ -207,3 +210,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

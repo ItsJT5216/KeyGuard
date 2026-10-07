@@ -167,3 +167,4 @@ class OpenRouterAdapter:
         if verified.get("disabled") is not True:
             raise ProviderError("OpenRouter did not verify the key as disabled")
         return {"action": "disable", "verified": True}
+

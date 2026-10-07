@@ -456,6 +456,60 @@ class FoundationTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_api_persists_validated_per_credential_polling_config(self) -> None:
+        token = "test-token-that-is-long-enough-123456"
+        server = create_server(self.store, token, 0)
+        session = authorize(server)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            body = {
+                "provider": "openrouter",
+                "name": "Custom schedule",
+                "api_key": "management-secret",
+                "threshold": 20,
+                "metadata": {"key_hash": "a" * 64},
+                "protection_action": "disable",
+                "polling": {
+                    "quiet_interval_seconds": 7200,
+                    "watch_interval_seconds": 1800,
+                },
+            }
+            request = urllib.request.Request(
+                f"{base}/api/credentials",
+                data=json.dumps(body).encode(),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"KeyGuard-Session {session}",
+                },
+            )
+            with urllib.request.urlopen(request) as response:
+                created = json.loads(response.read())["credential"]
+            self.assertEqual(7200, created["polling_config"]["quiet_interval_seconds"])
+            self.assertEqual(1800, created["polling_config"]["watch_interval_seconds"])
+            self.assertEqual("due", created["scheduler"]["polling_tier"])
+
+            body["polling"] = {"quiet_distance": 5, "watch_distance": 10}
+            rejected = urllib.request.Request(
+                f"{base}/api/credentials",
+                data=json.dumps(body).encode(),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"KeyGuard-Session {session}",
+                },
+            )
+            with self.assertRaises(urllib.error.HTTPError) as context:
+                urllib.request.urlopen(rejected)
+            self.assertEqual(422, context.exception.code)
+            context.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_vault_and_database_update_are_serialized(self) -> None:
         self.store.close()
         vault = BlockingVault()
