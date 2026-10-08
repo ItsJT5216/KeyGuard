@@ -10,13 +10,38 @@
 <body>
   <main>
     <header>
-      <p class="eyebrow">LOCAL CREDIT PROTECTION</p>
-      <h1>KeyGuard</h1>
-      <p class="lede">Secrets stay in GNOME Keyring. This page reads only daemon state.</p>
+      <div>
+        <p class="eyebrow">LOCAL CREDIT PROTECTION</p>
+        <h1>KeyGuard</h1>
+        <p class="lede">A quiet sentry for provider credits. Secrets stay in GNOME Keyring; every value below comes from the daemon.</p>
+      </div>
+      <div class="header-actions">
+        <button id="refresh" type="button">Refresh state</button>
+        <button id="test-notification" type="button" class="secondary">Test ntfy</button>
+      </div>
     </header>
 
-    <section aria-labelledby="add-title">
-      <h2 id="add-title">Add credential</h2>
+    <p id="global-message" class="message" role="status" aria-live="polite"></p>
+
+    <section aria-labelledby="keys-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">LIVE DAEMON STATE</p>
+          <h2 id="keys-title">Protected credentials</h2>
+        </div>
+        <p id="credential-count" class="muted"></p>
+      </div>
+      <div id="credentials" class="credentials" aria-live="polite"></div>
+    </section>
+
+    <section aria-labelledby="add-title" class="add-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">GNOME KEYRING</p>
+          <h2 id="add-title">Add a credential</h2>
+        </div>
+        <p class="muted">The raw key disappears after save.</p>
+      </div>
       <form id="credential-form" method="post">
         <label>Provider <input name="provider" list="provider-options" required maxlength="80" autocomplete="off"></label>
         <datalist id="provider-options"><option value="openrouter"></option></datalist>
@@ -33,15 +58,7 @@
         <label class="check"><input name="auto_protect" type="checkbox"> Auto Protect</label>
         <button type="submit">Save to Keyring</button>
       </form>
-      <p id="form-message" role="status"></p>
-    </section>
-
-    <section aria-labelledby="keys-title">
-      <div class="section-heading">
-        <h2 id="keys-title">Credentials</h2>
-        <button id="refresh" type="button">Refresh</button>
-      </div>
-      <div id="credentials" class="credentials"></div>
+      <p id="form-message" class="message" role="status" aria-live="polite"></p>
     </section>
   </main>
 </body>

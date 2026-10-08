@@ -182,6 +182,18 @@ class FoundationTests(unittest.TestCase):
             with urllib.request.urlopen(request) as response:
                 created_payload = response.read()
             self.assertNotIn(secret.encode(), created_payload)
+            created = json.loads(created_payload)["credential"]
+            self.store.record_usage_snapshot(
+                created["id"],
+                {
+                    "checked_at": "2026-10-08T10:00:00+00:00",
+                    "used": 4,
+                    "limit": 10,
+                    "remaining": 6,
+                    "unit": "credits",
+                    "provider_status": {"scope": "test"},
+                },
+            )
 
             listing = urllib.request.Request(
                 f"{base}/api/credentials",
@@ -191,6 +203,10 @@ class FoundationTests(unittest.TestCase):
                 list_payload = response.read()
             self.assertNotIn(secret.encode(), list_payload)
             self.assertNotIn(b"api_key", list_payload)
+            live = json.loads(list_payload)["credentials"][0]
+            self.assertEqual(4, live["usage"]["used"])
+            self.assertEqual(40, live["usage"]["percent_consumed"])
+            self.assertEqual("test", live["usage"]["provider_status"]["scope"])
 
             rejected = urllib.request.Request(
                 f"{base}/api/credentials",
@@ -332,6 +348,66 @@ class FoundationTests(unittest.TestCase):
         self.assertTrue(
             {"credentials", "events", "usage_snapshots", "scheduler_state"} <= tables
         )
+        snapshot_columns = {
+            row[1]
+            for row in self.store._db.execute(
+                "PRAGMA table_info(usage_snapshots)"
+            ).fetchall()
+        }
+        self.assertIn("provider_status_json", snapshot_columns)
+
+    def test_dashboard_state_uses_real_snapshots_and_last_protection_action(
+        self,
+    ) -> None:
+        created = self.store.create_credential(
+            provider="Example",
+            name="Primary",
+            secret="secret",
+            threshold=15,
+            auto_protect=True,
+        )
+        credential_id = created["id"]
+        self.store.record_usage_snapshot(
+            credential_id,
+            {
+                "checked_at": "2026-10-08T09:00:00+00:00",
+                "used": 2,
+                "limit": 20,
+                "remaining": 18,
+                "unit": "USD",
+                "provider_status": {"limit_reset": "2026-11-01T00:00:00+00:00"},
+            },
+        )
+        self.store.record_usage_snapshot(
+            credential_id,
+            {
+                "checked_at": "2026-10-08T10:00:00+00:00",
+                "used": 6,
+                "limit": 20,
+                "remaining": 14,
+                "unit": "USD",
+                "provider_status": {"limit_reset": "2026-11-01T00:00:00+00:00"},
+            },
+        )
+        self.store.record_event(
+            credential_id,
+            "protection_action",
+            "success",
+            {"action": "disable"},
+        )
+
+        state = self.store.dashboard_state(credential_id)
+
+        self.assertEqual(6, state["usage"]["used"])
+        self.assertEqual(14, state["usage"]["remaining"])
+        self.assertEqual(30, state["usage"]["percent_consumed"])
+        self.assertEqual(
+            "2026-11-01T00:00:00+00:00",
+            state["usage"]["provider_status"]["limit_reset"],
+        )
+        self.assertAlmostEqual(4 / 3600, state["burn_rate_per_second"])
+        self.assertEqual("protection_action", state["last_action"]["event_type"])
+        self.assertEqual("success", state["last_action"]["result"])
 
     def test_api_uses_challenge_one_time_bootstrap_and_origin_scoped_session(
         self,
@@ -394,6 +470,32 @@ class FoundationTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_dashboard_assets_are_daemon_served_with_strict_csp(self) -> None:
+        server = create_server(self.store, "test-token-that-is-long-enough-123456", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with urllib.request.urlopen(f"{base}/") as response:
+                page = response.read()
+                policy = response.headers["Content-Security-Policy"]
+            with urllib.request.urlopen(f"{base}/app.js") as response:
+                script = response.read()
+            with urllib.request.urlopen(f"{base}/style.css") as response:
+                styles = response.read()
+
+            self.assertIn(b'id="credentials"', page)
+            self.assertIn(b"sortCredentials", script)
+            self.assertIn(b"progress-track", styles)
+            self.assertIn("default-src 'self'", policy)
+            self.assertIn("script-src 'self'", policy)
+            self.assertIn("style-src 'self'", policy)
+            self.assertNotIn("unsafe-inline", policy)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_bootstrap_rejects_expired_and_tampered_capabilities(self) -> None:
         token = "test-token-that-is-long-enough-123456"
         authority = SessionAuthority(token)
@@ -418,8 +520,17 @@ class FoundationTests(unittest.TestCase):
         self.assertNotIn("localStorage", script)
         self.assertNotIn("document.cookie", script)
         self.assertNotIn('setItem("api_key"', script)
-        self.assertIn("credential.available_actions.includes(configuredAction)", script)
+        self.assertIn(
+            "protect.disabled = !(credential.available_actions || []).includes(", script
+        )
         self.assertNotIn('credential.available_actions.join(", ")', script)
+        self.assertNotIn("Math.random", script)
+        self.assertIn("/api/credentials/${encodeURIComponent(id)}/${action}", script)
+        self.assertIn(
+            "/api/credentials/${encodeURIComponent(credential.id)}/history", script
+        )
+        self.assertIn('method: "PATCH"', script)
+        self.assertIn("limit_reset", script)
 
     def test_api_rejects_non_finite_and_giant_thresholds(self) -> None:
         token = "test-token-that-is-long-enough-123456"

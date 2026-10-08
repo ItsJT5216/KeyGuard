@@ -242,6 +242,7 @@ def make_handler(
         def _credential_payload(self, credential: dict[str, Any]) -> dict[str, Any]:
             result = providers.enrich(credential)
             result["scheduler"] = store.get_scheduler_state(credential["id"])
+            result.update(store.dashboard_state(credential["id"]))
             return result
 
         def do_GET(self) -> None:
@@ -545,4 +546,3 @@ def create_server(
     server.scheduler = scheduler
     server.scheduler_runner = scheduler_runner
     return server
-

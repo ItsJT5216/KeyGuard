@@ -98,10 +98,22 @@ class Store:
                     unit TEXT,
                     success INTEGER NOT NULL,
                     error_code TEXT,
+                    provider_status_json TEXT NOT NULL DEFAULT '{}',
                     FOREIGN KEY (credential_id) REFERENCES credentials(id) ON DELETE CASCADE
                 )
                 """
             )
+            snapshot_columns = {
+                row["name"]
+                for row in self._db.execute(
+                    "PRAGMA table_info(usage_snapshots)"
+                ).fetchall()
+            }
+            if "provider_status_json" not in snapshot_columns:
+                self._db.execute(
+                    "ALTER TABLE usage_snapshots ADD COLUMN "
+                    "provider_status_json TEXT NOT NULL DEFAULT '{}'"
+                )
             self._db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS scheduler_state (
@@ -358,8 +370,8 @@ class Store:
                 """
                 INSERT INTO usage_snapshots
                     (credential_id, checked_at, used, configured_limit, remaining,
-                     unit, success, error_code)
-                VALUES (?, ?, ?, ?, ?, ?, 1, NULL)
+                     unit, success, error_code, provider_status_json)
+                VALUES (?, ?, ?, ?, ?, ?, 1, NULL, ?)
                 """,
                 (
                     credential_id,
@@ -368,6 +380,9 @@ class Store:
                     snapshot.get("limit"),
                     snapshot.get("remaining"),
                     snapshot["unit"],
+                    json.dumps(
+                        snapshot.get("provider_status", {}), separators=(",", ":")
+                    ),
                 ),
             )
 
@@ -376,12 +391,65 @@ class Store:
             rows = self._db.execute(
                 """
                 SELECT checked_at, used, configured_limit, remaining, unit, success,
-                       error_code
+                       error_code, provider_status_json
                 FROM usage_snapshots WHERE credential_id = ? ORDER BY id DESC
                 """,
                 (credential_id,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        history = []
+        for row in rows:
+            item = dict(row)
+            item["provider_status"] = json.loads(item.pop("provider_status_json"))
+            history.append(item)
+        return history
+
+    def dashboard_state(self, credential_id: str) -> dict[str, Any]:
+        """Return safe, derived live state for the thin dashboard client."""
+        usage = self.usage_history(credential_id)
+        latest = usage[0] if usage else None
+        burn_rate: float | None = None
+        if len(usage) > 1:
+            current, previous = usage[0], usage[1]
+            current_used = current.get("used")
+            previous_used = previous.get("used")
+            if current_used is not None and previous_used is not None:
+                elapsed = (
+                    datetime.fromisoformat(current["checked_at"])
+                    - datetime.fromisoformat(previous["checked_at"])
+                ).total_seconds()
+                delta = float(current_used) - float(previous_used)
+                if elapsed > 0 and delta > 0:
+                    burn_rate = delta / elapsed
+
+        latest_usage = None
+        if latest is not None:
+            limit = latest.get("configured_limit")
+            used = latest.get("used")
+            percent_consumed = None
+            if limit not in (None, 0) and used is not None:
+                percent_consumed = max(
+                    0.0, min(float(used) / float(limit) * 100, 100.0)
+                )
+            latest_usage = {
+                "checked_at": latest["checked_at"],
+                "used": used,
+                "limit": limit,
+                "remaining": latest.get("remaining"),
+                "unit": latest.get("unit"),
+                "percent_consumed": percent_consumed,
+                "provider_status": latest.get("provider_status", {}),
+            }
+
+        events = self.history(credential_id) or []
+        last_action = next(
+            (event for event in events if event["event_type"] == "protection_action"),
+            None,
+        )
+        return {
+            "usage": latest_usage,
+            "burn_rate_per_second": burn_rate,
+            "last_action": last_action,
+        }
 
     def get_scheduler_state(self, credential_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -568,4 +636,3 @@ class Store:
                 "SELECT DISTINCT provider FROM credentials ORDER BY provider COLLATE NOCASE"
             ).fetchall()
         return [{"id": row["provider"], "capabilities": []} for row in rows]
-
