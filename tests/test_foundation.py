@@ -150,6 +150,7 @@ class FoundationTests(unittest.TestCase):
         ]
         self.assertIn("monitoring_paused", event_types)
         self.assertIn("monitoring_resumed", event_types)
+        self.assertEqual(1, len(self.store.history(created["id"], limit=1)))
 
     def test_api_never_returns_raw_secret_and_rejects_remote_origin(self) -> None:
         token = "test-token-that-is-long-enough-123456"
@@ -355,6 +356,14 @@ class FoundationTests(unittest.TestCase):
             ).fetchall()
         }
         self.assertIn("provider_status_json", snapshot_columns)
+        indexes = {
+            row[0]
+            for row in self.store._db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        self.assertIn("usage_snapshots_credential_id_id", indexes)
+        self.assertIn("events_credential_type_id", indexes)
 
     def test_dashboard_state_uses_real_snapshots_and_last_protection_action(
         self,
@@ -408,6 +417,21 @@ class FoundationTests(unittest.TestCase):
         self.assertAlmostEqual(4 / 3600, state["burn_rate_per_second"])
         self.assertEqual("protection_action", state["last_action"]["event_type"])
         self.assertEqual("success", state["last_action"]["result"])
+
+        self.store.record_usage_snapshot(
+            credential_id,
+            {
+                "checked_at": "2026-10-08T11:00:00+00:00",
+                "used": 6,
+                "limit": 20,
+                "remaining": 14,
+                "unit": "USD",
+                "provider_status": {},
+            },
+        )
+        self.assertEqual(
+            0, self.store.dashboard_state(credential_id)["burn_rate_per_second"]
+        )
 
     def test_api_uses_challenge_one_time_bootstrap_and_origin_scoped_session(
         self,
@@ -527,8 +551,15 @@ class FoundationTests(unittest.TestCase):
         self.assertNotIn("Math.random", script)
         self.assertIn("/api/credentials/${encodeURIComponent(id)}/${action}", script)
         self.assertIn(
-            "/api/credentials/${encodeURIComponent(credential.id)}/history", script
+            "/api/credentials/${encodeURIComponent(credential.id)}/history?limit=12",
+            script,
         )
+        self.assertIn("const polling = {...(credential.polling_config || {})}", script)
+        self.assertIn("background && hasActiveInteraction()", script)
+        self.assertIn('tier === "error_retry"', script)
+        self.assertIn("credential.status)", script)
+        self.assertIn('"action_failed"', script)
+        self.assertIn("credential.burn_rate_per_second !== null", script)
         self.assertIn('method: "PATCH"', script)
         self.assertIn("limit_reset", script)
 
@@ -585,6 +616,8 @@ class FoundationTests(unittest.TestCase):
                 "polling": {
                     "quiet_interval_seconds": 7200,
                     "watch_interval_seconds": 1800,
+                    "safety_margin_seconds": 321,
+                    "jitter_fraction": 0.1,
                 },
             }
             request = urllib.request.Request(
@@ -600,7 +633,44 @@ class FoundationTests(unittest.TestCase):
                 created = json.loads(response.read())["credential"]
             self.assertEqual(7200, created["polling_config"]["quiet_interval_seconds"])
             self.assertEqual(1800, created["polling_config"]["watch_interval_seconds"])
+            self.assertEqual(321, created["polling_config"]["safety_margin_seconds"])
+            self.assertEqual(0.1, created["polling_config"]["jitter_fraction"])
             self.assertEqual("due", created["scheduler"]["polling_tier"])
+
+            patch_request = urllib.request.Request(
+                f"{base}/api/credentials/{created['id']}",
+                data=json.dumps({"polling": {"quiet_interval_seconds": 6000}}).encode(),
+                method="PATCH",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"KeyGuard-Session {session}",
+                },
+            )
+            with urllib.request.urlopen(patch_request) as response:
+                updated = json.loads(response.read())["credential"]
+            self.assertEqual(6000, updated["polling_config"]["quiet_interval_seconds"])
+            self.assertEqual(321, updated["polling_config"]["safety_margin_seconds"])
+            self.assertEqual(0.1, updated["polling_config"]["jitter_fraction"])
+
+            for index in range(15):
+                self.store.record_event(created["id"], "test_event", str(index))
+            history_request = urllib.request.Request(
+                f"{base}/api/credentials/{created['id']}/history?limit=12",
+                headers={"Authorization": f"KeyGuard-Session {session}"},
+            )
+            with urllib.request.urlopen(history_request) as response:
+                events = json.loads(response.read())["events"]
+            self.assertEqual(12, len(events))
+            self.assertEqual("14", events[0]["result"])
+
+            invalid_limit = urllib.request.Request(
+                f"{base}/api/credentials/{created['id']}/history?limit=0",
+                headers={"Authorization": f"KeyGuard-Session {session}"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as context:
+                urllib.request.urlopen(invalid_limit)
+            self.assertEqual(422, context.exception.code)
+            context.exception.close()
 
             body["polling"] = {"quiet_distance": 5, "watch_distance": 10}
             rejected = urllib.request.Request(

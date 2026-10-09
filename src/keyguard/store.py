@@ -103,6 +103,18 @@ class Store:
                 )
                 """
             )
+            self._db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS usage_snapshots_credential_id_id
+                ON usage_snapshots (credential_id, id DESC)
+                """
+            )
+            self._db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS events_credential_type_id
+                ON events (credential_id, event_type, id DESC)
+                """
+            )
             snapshot_columns = {
                 row["name"]
                 for row in self._db.execute(
@@ -405,7 +417,32 @@ class Store:
 
     def dashboard_state(self, credential_id: str) -> dict[str, Any]:
         """Return safe, derived live state for the thin dashboard client."""
-        usage = self.usage_history(credential_id)
+        with self._lock:
+            usage_rows = self._db.execute(
+                """
+                SELECT checked_at, used, configured_limit, remaining, unit, success,
+                       error_code, provider_status_json
+                FROM usage_snapshots
+                WHERE credential_id = ?
+                ORDER BY id DESC
+                LIMIT 2
+                """,
+                (credential_id,),
+            ).fetchall()
+            action_row = self._db.execute(
+                """
+                SELECT * FROM events
+                WHERE credential_id = ? AND event_type = 'protection_action'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (credential_id,),
+            ).fetchone()
+        usage = []
+        for row in usage_rows:
+            item = dict(row)
+            item["provider_status"] = json.loads(item.pop("provider_status_json"))
+            usage.append(item)
         latest = usage[0] if usage else None
         burn_rate: float | None = None
         if len(usage) > 1:
@@ -418,7 +455,7 @@ class Store:
                     - datetime.fromisoformat(previous["checked_at"])
                 ).total_seconds()
                 delta = float(current_used) - float(previous_used)
-                if elapsed > 0 and delta > 0:
+                if elapsed > 0 and delta >= 0:
                     burn_rate = delta / elapsed
 
         latest_usage = None
@@ -440,11 +477,7 @@ class Store:
                 "provider_status": latest.get("provider_status", {}),
             }
 
-        events = self.history(credential_id) or []
-        last_action = next(
-            (event for event in events if event["event_type"] == "protection_action"),
-            None,
-        )
+        last_action = self._event_public(action_row) if action_row else None
         return {
             "usage": latest_usage,
             "burn_rate_per_second": burn_rate,
@@ -617,17 +650,21 @@ class Store:
             "created_at": row["created_at"],
         }
 
-    def history(self, credential_id: str) -> list[dict[str, Any]] | None:
+    def history(
+        self, credential_id: str, *, limit: int | None = None
+    ) -> list[dict[str, Any]] | None:
         with self._lock:
             exists = self._db.execute(
                 "SELECT 1 FROM credentials WHERE id = ?", (credential_id,)
             ).fetchone()
             if exists is None:
                 return None
-            rows = self._db.execute(
-                "SELECT * FROM events WHERE credential_id = ? ORDER BY id DESC",
-                (credential_id,),
-            ).fetchall()
+            statement = "SELECT * FROM events WHERE credential_id = ? ORDER BY id DESC"
+            parameters: list[Any] = [credential_id]
+            if limit is not None:
+                statement += " LIMIT ?"
+                parameters.append(limit)
+            rows = self._db.execute(statement, parameters).fetchall()
         return [self._event_public(row) for row in rows]
 
     def providers(self) -> list[dict[str, Any]]:

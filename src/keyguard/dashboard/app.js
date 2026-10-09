@@ -83,10 +83,11 @@ function sortCredentials(left, right) {
 function displayStatus(credential) {
   if (credential.paused) return {label: "Paused", slug: "paused"};
   if (credential.status === "disabled") return {label: "Disabled", slug: "disabled"};
-  if (["error", "cleanup_required"].includes(credential.status)) {
+  const tier = credential.scheduler?.polling_tier || "";
+  if (["error", "cleanup_required", "action_failed"].includes(credential.status)
+      || tier === "error_retry") {
     return {label: "Error", slug: "error"};
   }
-  const tier = credential.scheduler?.polling_tier || "";
   if (tier.includes("critical") || tier.includes("urgent")) {
     return {label: "Critical", slug: "critical"};
   }
@@ -251,7 +252,7 @@ function editForm(credential) {
   editor.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(editor);
-    const polling = {};
+    const polling = {...(credential.polling_config || {})};
     for (const name of [
       "quiet_distance", "watch_distance", "accelerated_distance", "critical_distance",
       "quiet_interval_seconds", "watch_interval_seconds", "accelerated_interval_seconds",
@@ -279,19 +280,26 @@ function historyPanel(credential) {
   const details = document.createElement("details");
   details.className = "history";
   details.append(text("summary", "Event history"));
+  const content = document.createElement("div");
+  details.append(content);
   let loaded = false;
+  let loading = false;
   details.addEventListener("toggle", async () => {
-    if (!details.open || loaded) return;
-    loaded = true;
+    if (!details.open || loaded || loading) return;
+    loading = true;
+    content.replaceChildren(text("p", "Loading event history…", "muted"));
     try {
-      const {events} = await api(`/api/credentials/${encodeURIComponent(credential.id)}/history`);
+      const {events} = await api(`/api/credentials/${encodeURIComponent(credential.id)}/history?limit=12`);
       const list = document.createElement("ol");
-      for (const event of events.slice(0, 12)) {
+      for (const event of events) {
         list.append(text("li", `${when(event.created_at)} · ${event.event_type.replaceAll("_", " ")} · ${event.result}`));
       }
-      details.append(events.length ? list : text("p", "No events recorded yet.", "muted"));
+      content.replaceChildren(events.length ? list : text("p", "No events recorded yet.", "muted"));
+      loaded = true;
     } catch (error) {
-      details.append(text("p", error.message, "error"));
+      content.replaceChildren(text("p", `${error.message} Close and reopen this panel to retry.`, "error"));
+    } finally {
+      loading = false;
     }
   });
   return details;
@@ -322,7 +330,8 @@ function card(credential) {
     metric("Remaining", number(usage?.remaining, usage?.unit)),
     metric("Allocation", number(usage?.limit, usage?.unit)),
     metric("Kill threshold", number(credential.threshold, usage?.unit)),
-    metric("Burn rate", credential.burn_rate_per_second
+    metric("Burn rate", credential.burn_rate_per_second !== null
+        && credential.burn_rate_per_second !== undefined
       ? `${number(credential.burn_rate_per_second * 3600, usage?.unit)}/hour`
       : "Not enough history"),
     metric("Polling", duration(schedule.current_interval_seconds)),
@@ -366,12 +375,18 @@ function card(credential) {
   return article;
 }
 
-async function loadCredentials({quiet = false} = {}) {
+function hasActiveInteraction() {
+  return credentialList.querySelector(".edit-form:not([hidden]), details[open]") !== null;
+}
+
+async function loadCredentials({quiet = false, background = false} = {}) {
+  if (background && hasActiveInteraction()) return;
   const sequence = ++loadSequence;
   if (!quiet) credentialList.replaceChildren(text("p", "Loading daemon state…", "empty"));
   try {
     const {credentials} = await api("/api/credentials");
     if (sequence !== loadSequence) return;
+    if (background && hasActiveInteraction()) return;
     const ordered = [...credentials].sort(sortCredentials);
     credentialCount.textContent = `${ordered.length} credential${ordered.length === 1 ? "" : "s"}`;
     credentialList.replaceChildren(...(ordered.length
@@ -448,7 +463,8 @@ async function start() {
     return;
   }
   await loadCredentials();
-  window.setInterval(() => loadCredentials({quiet: true}), 30_000);
+  window.setInterval(() => loadCredentials({quiet: true, background: true}), 30_000);
 }
 
 start();
+
