@@ -14,6 +14,7 @@ from typing import Any
 from .protection import ProtectionService
 from .providers.base import ProviderError
 from .store import Store
+from .notifications import NtfyNotifier
 
 LOGGER = logging.getLogger("keyguard.scheduler")
 MAX_CONCURRENT_CHECKS = 4
@@ -113,10 +114,12 @@ class AdaptiveScheduler:
         protection: ProtectionService,
         *,
         jitter: Callable[[float, float], float] = random.uniform,
+        notifications: NtfyNotifier | None = None,
     ) -> None:
         self.store = store
         self.protection = protection
         self._jitter = jitter
+        self.notifications = notifications
         self._wake = threading.Event()
 
     @staticmethod
@@ -216,6 +219,8 @@ class AdaptiveScheduler:
             return None
         history = self.store.usage_history(credential_id)
         plan = self.plan(credential, snapshot, history)
+        previous_state = self.store.get_scheduler_state(credential_id) or {}
+        previous_tier = previous_state.get("polling_tier")
         checked_at = self._time(snapshot["checked_at"])
         next_check = checked_at + timedelta(seconds=plan.interval_seconds)
         self.store.set_scheduler_state(
@@ -226,7 +231,55 @@ class AdaptiveScheduler:
             polling_tier=plan.tier,
             consecutive_failures=0,
         )
+        self._notify_tier_transition(credential, snapshot, previous_tier, plan)
         return plan
+
+    @staticmethod
+    def _tier_group(tier: str | None) -> str | None:
+        value = (tier or "").removeprefix("burn_")
+        if value in {"critical", "urgent"}:
+            return "critical"
+        if value == "accelerated":
+            return "accelerated"
+        return None
+
+    def _notify_tier_transition(
+        self,
+        credential: dict[str, Any],
+        snapshot: dict[str, Any],
+        previous_tier: str | None,
+        plan: PollingPlan,
+    ) -> None:
+        group = self._tier_group(plan.tier)
+        if group is None or group == self._tier_group(previous_tier):
+            return
+        event = self.store.record_event(
+            credential["id"],
+            "polling_tier_changed",
+            group,
+            {
+                "from": previous_tier,
+                "to": plan.tier,
+                "interval_seconds": plan.interval_seconds,
+            },
+        )
+        if self.notifications is None:
+            return
+        remaining = snapshot.get("remaining")
+        unit = snapshot.get("unit") or ""
+        amount = (
+            f"{remaining:g} {unit} remaining"
+            if isinstance(remaining, (int, float))
+            else "the protection threshold is approaching"
+        )
+        self.notifications.deliver_event(
+            credential,
+            event,
+            f"{credential['name']} has {amount}. Polling increased to every "
+            f"{plan.interval_seconds // 60 or 1} minute(s).",
+            priority="high" if group == "critical" else "default",
+            tags="warning,chart_with_upwards_trend",
+        )
 
     def schedule_outcome(
         self, credential_id: str, outcome: dict[str, Any]
@@ -261,6 +314,23 @@ class AdaptiveScheduler:
             polling_tier="error_retry",
             consecutive_failures=failures,
         )
+        if failures == 3:
+            credential = self.store.get_credential(credential_id)
+            if credential is not None:
+                event = self.store.record_event(
+                    credential_id,
+                    "provider_failures_repeated",
+                    "failed",
+                    {"consecutive_failures": failures},
+                )
+                if self.notifications is not None:
+                    self.notifications.deliver_event(
+                        credential,
+                        event,
+                        f"{credential['name']} has failed three provider checks in a row.",
+                        priority="high",
+                        tags="warning,cloud",
+                    )
 
     def _process_credential(self, credential: dict[str, Any], current: datetime) -> int:
         credential_id = credential["id"]

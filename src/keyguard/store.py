@@ -139,6 +139,25 @@ class Store:
                 )
                 """
             )
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_config (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    server_url TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            self._db.execute(
+                """
+                INSERT OR IGNORE INTO notification_config
+                    (singleton, server_url, topic, enabled, updated_at)
+                VALUES (1, 'https://ntfy.sh', 'keyguard', 0, ?)
+                """,
+                (utc_now(),),
+            )
 
     def _recover_incomplete_credentials(self) -> None:
         with self._lock:
@@ -673,3 +692,46 @@ class Store:
                 "SELECT DISTINCT provider FROM credentials ORDER BY provider COLLATE NOCASE"
             ).fetchall()
         return [{"id": row["provider"], "capabilities": []} for row in rows]
+
+    def get_notification_config(self) -> dict[str, Any]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT server_url, topic, enabled, updated_at "
+                "FROM notification_config WHERE singleton = 1"
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Notification configuration is unavailable")
+        return {
+            "server_url": row["server_url"],
+            "topic": row["topic"],
+            "enabled": bool(row["enabled"]),
+            "auth_configured": self.vault.get("__notification_ntfy_auth__") is not None,
+            "updated_at": row["updated_at"],
+        }
+
+    def update_notification_config(
+        self, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        current = self.get_notification_config()
+        server_url = values.get("server_url", current["server_url"])
+        topic = values.get("topic", current["topic"])
+        enabled = values.get("enabled", current["enabled"])
+        auth_token = values.get("auth_token", ...)
+        if auth_token is not ...:
+            if auth_token:
+                self.vault.set("__notification_ntfy_auth__", auth_token)
+            else:
+                self.vault.delete("__notification_ntfy_auth__")
+        with self._lock, self._db:
+            self._db.execute(
+                """
+                UPDATE notification_config
+                SET server_url = ?, topic = ?, enabled = ?, updated_at = ?
+                WHERE singleton = 1
+                """,
+                (server_url, topic, int(enabled), utc_now()),
+            )
+        return self.get_notification_config()
+
+    def get_notification_secret(self) -> str | None:
+        return self.vault.get("__notification_ntfy_auth__")

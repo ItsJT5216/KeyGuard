@@ -11,6 +11,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .auth import SessionAuthority
+from .notifications import (
+    NotificationError,
+    NtfyNotifier,
+    validate_notification_config,
+)
 from .protection import ProtectionService
 from .providers import ProviderRegistry
 from .providers.base import ProviderError
@@ -127,6 +132,7 @@ def make_handler(
     providers: ProviderRegistry,
     protection: ProtectionService,
     scheduler: AdaptiveScheduler,
+    notifications: NtfyNotifier,
 ):
     class Handler(BaseHTTPRequestHandler):
         server_version = "KeyGuard"
@@ -282,6 +288,8 @@ def make_handler(
                     )
                 elif segments == ["api", "providers"]:
                     self._json(200, {"providers": providers.list()})
+                elif segments == ["api", "notifications"]:
+                    self._json(200, {"notifications": store.get_notification_config()})
                 elif len(segments) == 3 and segments[:2] == ["api", "credentials"]:
                     credential = store.get_credential(segments[2])
                     if credential is None:
@@ -420,9 +428,9 @@ def make_handler(
                         self._json(200, outcome)
                         return
                 if segments == ["api", "notifications", "test"]:
-                    raise ApiError(
-                        501, "NOT_IMPLEMENTED", "Notifications are implemented by X-9"
-                    )
+                    notifications.test()
+                    self._json(200, {"sent": True})
+                    return
                 raise ApiError(404, "NOT_FOUND", "Route not found")
             except ApiError as error:
                 self._error(error)
@@ -430,6 +438,8 @@ def make_handler(
                 self._error(ApiError(502, "PROVIDER_ERROR", str(error)))
             except PollingConfigError as error:
                 self._error(ApiError(422, "POLLING_CONFIGURATION_ERROR", str(error)))
+            except NotificationError as error:
+                self._error(ApiError(502, "NOTIFICATION_ERROR", str(error)))
             except RuntimeError as error:
                 LOGGER.warning("Credential operation failed: %s", error)
                 self._error(
@@ -445,6 +455,17 @@ def make_handler(
             try:
                 self._prepare()
                 segments = self._segments(self.path)
+                if segments == ["api", "notifications"]:
+                    body = self._body()
+                    try:
+                        values = validate_notification_config(body)
+                    except ValueError as error:
+                        raise ApiError(
+                            422, "NOTIFICATION_CONFIGURATION_ERROR", str(error)
+                        ) from error
+                    config = store.update_notification_config(values)
+                    self._json(200, {"notifications": config})
+                    return
                 if len(segments) != 3 or segments[:2] != ["api", "credentials"]:
                     raise ApiError(404, "NOT_FOUND", "Route not found")
                 body = self._body()
@@ -560,14 +581,20 @@ def create_server(
 ) -> BoundedThreadingHTTPServer:
     authority = SessionAuthority(auth_token)
     registry = providers or ProviderRegistry()
-    protection = ProtectionService(store, registry)
-    scheduler = AdaptiveScheduler(store, protection)
+    notifications = NtfyNotifier(store)
+    protection = ProtectionService(store, registry, notifications)
+    scheduler = AdaptiveScheduler(
+        store, protection, notifications=notifications
+    )
     scheduler_runner = SchedulerRunner(scheduler)
     server = BoundedThreadingHTTPServer(
         ("127.0.0.1", port),
-        make_handler(store, authority, registry, protection, scheduler),
+        make_handler(
+            store, authority, registry, protection, scheduler, notifications
+        ),
     )
     server.authority = authority
     server.scheduler = scheduler
     server.scheduler_runner = scheduler_runner
+    server.notifications = notifications
     return server
