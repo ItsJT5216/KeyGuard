@@ -242,6 +242,7 @@ def make_handler(
         def _credential_payload(self, credential: dict[str, Any]) -> dict[str, Any]:
             result = providers.enrich(credential)
             result["scheduler"] = store.get_scheduler_state(credential["id"])
+            result.update(store.dashboard_state(credential["id"]))
             return result
 
         def do_GET(self) -> None:
@@ -293,7 +294,24 @@ def make_handler(
                     and segments[:2] == ["api", "credentials"]
                     and segments[3] == "history"
                 ):
-                    history = store.history(segments[2])
+                    raw_limit = parse_qs(
+                        urlparse(self.path).query, keep_blank_values=True
+                    ).get("limit", [None])[0]
+                    limit = None
+                    if raw_limit is not None:
+                        try:
+                            limit = int(raw_limit)
+                        except ValueError as exc:
+                            raise ApiError(
+                                422, "VALIDATION_ERROR", "limit must be an integer"
+                            ) from exc
+                        if not 1 <= limit <= 100:
+                            raise ApiError(
+                                422,
+                                "VALIDATION_ERROR",
+                                "limit must be between 1 and 100",
+                            )
+                    history = store.history(segments[2], limit=limit)
                     if history is None:
                         raise ApiError(404, "NOT_FOUND", "Credential not found")
                     self._json(200, {"events": history})
@@ -463,13 +481,21 @@ def make_handler(
                         "protection_action",
                         maximum=40,
                     )
-                if "polling" in body:
-                    values["polling_config"] = normalize_polling_config(body["polling"])
+                polling_update = body.get("polling") if "polling" in body else None
                 credential_id = segments[2]
                 with protection.credential_operation(credential_id):
                     current = store.get_credential(credential_id)
                     if current is None:
                         raise ApiError(404, "NOT_FOUND", "Credential not found")
+                    if "polling" in body:
+                        if polling_update is None:
+                            values["polling_config"] = normalize_polling_config(None)
+                        else:
+                            if not isinstance(polling_update, dict):
+                                raise PollingConfigError("polling must be an object")
+                            values["polling_config"] = normalize_polling_config(
+                                {**current["polling_config"], **polling_update}
+                            )
                     provider, metadata, action = providers.validate_configuration(
                         values.get("provider", current["provider"]),
                         values.get("provider_metadata", current["provider_metadata"]),
@@ -545,4 +571,3 @@ def create_server(
     server.scheduler = scheduler
     server.scheduler_runner = scheduler_runner
     return server
-

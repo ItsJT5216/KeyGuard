@@ -2,12 +2,14 @@
 
 KeyGuard is a local-first Ubuntu daemon for tracking API-provider credentials without exposing stored secrets to its browser dashboard.
 
-The current implementation includes the [X-5 foundation](https://linear.app/itstanner5216/issue/X-5/1-build-keyguard-foundation-daemon-vault-sqlite-localhost-dashboard), the [X-7 OpenRouter protection path](https://linear.app/itstanner5216/issue/X-7/2-define-provider-adapter-contract-and-ship-first-verified-protection), and the [X-6 adaptive scheduler](https://linear.app/itstanner5216/issue/X-6/3-implement-adaptive-polling-and-burn-rate-escalation):
+The current implementation includes the [X-5 foundation](https://linear.app/itstanner5216/issue/X-5/1-build-keyguard-foundation-daemon-vault-sqlite-localhost-dashboard), the [X-7 OpenRouter protection path](https://linear.app/itstanner5216/issue/X-7/2-define-provider-adapter-contract-and-ship-first-verified-protection), the [X-6 adaptive scheduler](https://linear.app/itstanner5216/issue/X-6/3-implement-adaptive-polling-and-burn-rate-escalation), and the [X-8 live dashboard](https://linear.app/itstanner5216/issue/X-8/4-wire-the-html-dashboard-to-live-daemon-state-and-controls):
 
 - a loopback-only Python HTTP daemon;
 - GNOME Keyring storage through `keyring`, with no plaintext fallback;
 - SQLite storage for non-secret credential configuration, usage snapshots, scheduler state, and event history;
-- a daemon-served HTML dashboard backed by the real API;
+- a daemon-served HTML dashboard backed by real usage, scheduler, provider, and event state;
+- dashboard controls for on-demand checks, threshold and polling edits, pause/resume,
+  auto-protection, manual protection, history, and removal;
 - persisted distance- and burn-rate-driven polling with bounded jitter;
 - a user-service installer and desktop launcher.
 
@@ -28,6 +30,14 @@ keyguard open
 ```
 
 The dashboard may be closed without stopping the daemon. Reopening it reconnects to the same daemon and SQLite state.
+
+The dashboard refreshes while it is open and shows the latest authoritative usage,
+remaining allocation, burn rate, polling interval, check times, protection mode, and
+last protection result. Active credentials are ordered by the soonest provider reset
+when that information is available. Manual destructive actions require confirmation;
+automatic threshold protection continues without browser interaction. The notification
+test control reports that X-9 is not implemented until its real backend exists rather
+than displaying a false success.
 
 ## Adaptive polling
 

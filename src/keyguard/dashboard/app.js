@@ -1,6 +1,8 @@
 const credentialList = document.querySelector("#credentials");
+const credentialCount = document.querySelector("#credential-count");
 const form = document.querySelector("#credential-form");
-const message = document.querySelector("#form-message");
+const formMessage = document.querySelector("#form-message");
+const globalMessage = document.querySelector("#global-message");
 let sessionToken = window.sessionStorage.getItem("keyguardSession");
 let loadSequence = 0;
 let saving = false;
@@ -9,10 +11,7 @@ async function api(path, options = {}) {
   const headers = {...(options.headers || {})};
   if (options.body) headers["Content-Type"] = "application/json";
   if (sessionToken) headers.Authorization = `KeyGuard-Session ${sessionToken}`;
-  const response = await fetch(path, {
-    ...options,
-    headers,
-  });
+  const response = await fetch(path, {...options, headers});
   const payload = response.status === 204 ? null : await response.json();
   if (!response.ok) {
     if (response.status === 401) {
@@ -31,15 +30,95 @@ function text(tag, value, className) {
   return node;
 }
 
+function button(label, className = "") {
+  const node = text("button", label, className);
+  node.type = "button";
+  return node;
+}
+
+function showMessage(value, isError = false) {
+  globalMessage.textContent = value;
+  globalMessage.classList.toggle("error", isError);
+}
+
+function number(value, unit) {
+  if (value === null || value === undefined) return "Not available";
+  const formatted = new Intl.NumberFormat(undefined, {maximumFractionDigits: 4}).format(value);
+  return unit === "USD" ? `$${formatted}` : `${formatted} ${unit || ""}`.trim();
+}
+
+function when(value) {
+  if (!value) return "Not scheduled";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Provider did not supply a date" : date.toLocaleString();
+}
+
+function duration(seconds) {
+  if (seconds === null || seconds === undefined) return "Not scheduled";
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds / 3600)}h`;
+}
+
+function metric(label, value) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "metric";
+  wrapper.append(text("dt", label), text("dd", value));
+  return wrapper;
+}
+
+function expiryTime(credential) {
+  const raw = credential.usage?.provider_status?.limit_reset;
+  const parsed = raw ? Date.parse(raw) : Number.NaN;
+  return Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed;
+}
+
+function sortCredentials(left, right) {
+  const inactive = (credential) => credential.paused || credential.status === "disabled" ? 1 : 0;
+  return inactive(left) - inactive(right)
+    || expiryTime(left) - expiryTime(right)
+    || left.name.localeCompare(right.name);
+}
+
+function displayStatus(credential) {
+  if (credential.paused) return {label: "Paused", slug: "paused"};
+  if (credential.status === "disabled") return {label: "Disabled", slug: "disabled"};
+  const tier = credential.scheduler?.polling_tier || "";
+  if (["error", "cleanup_required", "action_failed"].includes(credential.status)
+      || tier === "error_retry") {
+    return {label: "Error", slug: "error"};
+  }
+  if (tier.includes("critical") || tier.includes("urgent")) {
+    return {label: "Critical", slug: "critical"};
+  }
+  if (tier === "quiet") return {label: "Healthy", slug: "healthy"};
+  return {label: "Watching", slug: "watching"};
+}
+
+async function patchCredential(id, values, successMessage) {
+  try {
+    await api(`/api/credentials/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(values),
+    });
+    showMessage(successMessage);
+    await loadCredentials({quiet: true});
+  } catch (error) {
+    showMessage(error.message, true);
+    throw error;
+  }
+}
+
 async function setPaused(id, paused) {
   try {
     await api(`/api/credentials/${encodeURIComponent(id)}/${paused ? "pause" : "resume"}`, {
       method: "POST",
       body: "{}",
     });
-    await loadCredentials();
+    showMessage(paused ? "Monitoring paused." : "Monitoring resumed and an immediate check was scheduled.");
+    await loadCredentials({quiet: true});
   } catch (error) {
-    message.textContent = error.message;
+    showMessage(error.message, true);
   }
 }
 
@@ -50,12 +129,18 @@ async function runAction(id, action) {
       method: "POST",
       body: "{}",
     });
-    message.textContent = action === "check"
-      ? `Checked: ${result.snapshot.used} ${result.snapshot.unit} used.`
-      : "Protection action verified by the provider.";
-    await loadCredentials();
+    if (action === "check") {
+      showMessage(result.snapshot
+        ? `Checked: ${number(result.snapshot.used, result.snapshot.unit)} used.`
+        : "Check completed.");
+    } else {
+      showMessage(result.action === "already_disabled"
+        ? "The provider key was already disabled."
+        : "Protection action verified by the provider.");
+    }
+    await loadCredentials({quiet: true});
   } catch (error) {
-    message.textContent = error.message;
+    showMessage(error.message, true);
   }
 }
 
@@ -63,62 +148,250 @@ async function removeCredential(id) {
   if (!window.confirm("Remove this credential from KeyGuard and GNOME Keyring?")) return;
   try {
     await api(`/api/credentials/${encodeURIComponent(id)}`, {method: "DELETE"});
-    await loadCredentials();
+    showMessage("Credential removed from KeyGuard and GNOME Keyring.");
+    await loadCredentials({quiet: true});
   } catch (error) {
-    message.textContent = error.message;
+    showMessage(error.message, true);
   }
 }
 
+function progress(usage) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "usage-block";
+  const percentage = usage?.percent_consumed;
+  const label = percentage === null || percentage === undefined
+    ? "No provider allocation available"
+    : `${percentage.toFixed(1)}% consumed`;
+  wrapper.append(text("div", label, "progress-label"));
+  const track = document.createElement("progress");
+  track.className = "progress-track";
+  track.setAttribute("aria-label", "Provider allocation consumed");
+  track.max = 100;
+  if (percentage !== null && percentage !== undefined) {
+    track.value = percentage;
+  }
+  wrapper.append(track);
+  return wrapper;
+}
+
+function pollingEditor(credential) {
+  const details = document.createElement("details");
+  details.className = "polling-editor";
+  details.append(text("summary", "Polling thresholds and intervals"));
+  const grid = document.createElement("div");
+  grid.className = "polling-grid";
+  const fields = [
+    ["quiet_distance", "Quiet distance"],
+    ["watch_distance", "Watch distance"],
+    ["accelerated_distance", "Accelerated distance"],
+    ["critical_distance", "Critical distance"],
+    ["quiet_interval_seconds", "Quiet interval (seconds)"],
+    ["watch_interval_seconds", "Watch interval (seconds)"],
+    ["accelerated_interval_seconds", "Accelerated interval (seconds)"],
+    ["critical_interval_seconds", "Critical interval (seconds)"],
+    ["urgent_interval_seconds", "Urgent interval (seconds)"],
+  ];
+  for (const [name, labelText] of fields) {
+    const input = document.createElement("input");
+    input.name = name;
+    input.type = "number";
+    input.min = name.includes("interval") ? "1" : "0";
+    input.step = "any";
+    input.value = credential.polling_config?.[name] ?? "";
+    const label = text("label", labelText);
+    label.append(input);
+    grid.append(label);
+  }
+  details.append(grid);
+  return details;
+}
+
+function editForm(credential) {
+  const editor = document.createElement("form");
+  editor.className = "edit-form";
+  editor.hidden = true;
+
+  const threshold = document.createElement("input");
+  threshold.name = "threshold";
+  threshold.type = "number";
+  threshold.min = "0";
+  threshold.step = "any";
+  threshold.value = credential.threshold ?? "";
+  const thresholdLabel = text("label", "Kill threshold");
+  thresholdLabel.append(threshold);
+
+  const action = document.createElement("select");
+  action.name = "protection_action";
+  const actions = new Set(["notify_only", ...(credential.available_actions || [])]);
+  for (const value of actions) {
+    const option = text("option", value.replaceAll("_", " "));
+    option.value = value;
+    option.selected = value === credential.protection_action;
+    action.append(option);
+  }
+  const actionLabel = text("label", "Protection action");
+  actionLabel.append(action);
+
+  const autoProtect = document.createElement("input");
+  autoProtect.name = "auto_protect";
+  autoProtect.type = "checkbox";
+  autoProtect.checked = credential.auto_protect;
+  const autoLabel = text("label", "Auto Protect", "check");
+  autoLabel.prepend(autoProtect);
+
+  const save = text("button", "Save settings");
+  save.type = "submit";
+  const cancel = button("Cancel", "secondary");
+  cancel.addEventListener("click", () => { editor.hidden = true; });
+
+  editor.append(thresholdLabel, actionLabel, autoLabel, pollingEditor(credential));
+  const actionsRow = document.createElement("div");
+  actionsRow.className = "controls";
+  actionsRow.append(save, cancel);
+  editor.append(actionsRow);
+  editor.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(editor);
+    const polling = {...(credential.polling_config || {})};
+    for (const name of [
+      "quiet_distance", "watch_distance", "accelerated_distance", "critical_distance",
+      "quiet_interval_seconds", "watch_interval_seconds", "accelerated_interval_seconds",
+      "critical_interval_seconds", "urgent_interval_seconds",
+    ]) {
+      const value = data.get(name);
+      if (value !== "") polling[name] = Number(value);
+    }
+    save.disabled = true;
+    try {
+      await patchCredential(credential.id, {
+        threshold: data.get("threshold") === "" ? null : Number(data.get("threshold")),
+        auto_protect: data.get("auto_protect") === "on",
+        protection_action: data.get("protection_action"),
+        polling,
+      }, "Credential settings saved and an immediate check was scheduled.");
+    } finally {
+      save.disabled = false;
+    }
+  });
+  return editor;
+}
+
+function historyPanel(credential) {
+  const details = document.createElement("details");
+  details.className = "history";
+  details.append(text("summary", "Event history"));
+  const content = document.createElement("div");
+  details.append(content);
+  let loaded = false;
+  let loading = false;
+  details.addEventListener("toggle", async () => {
+    if (!details.open || loaded || loading) return;
+    loading = true;
+    content.replaceChildren(text("p", "Loading event history…", "muted"));
+    try {
+      const {events} = await api(`/api/credentials/${encodeURIComponent(credential.id)}/history?limit=12`);
+      const list = document.createElement("ol");
+      for (const event of events) {
+        list.append(text("li", `${when(event.created_at)} · ${event.event_type.replaceAll("_", " ")} · ${event.result}`));
+      }
+      content.replaceChildren(events.length ? list : text("p", "No events recorded yet.", "muted"));
+      loaded = true;
+    } catch (error) {
+      content.replaceChildren(text("p", `${error.message} Close and reopen this panel to retry.`, "error"));
+    } finally {
+      loading = false;
+    }
+  });
+  return details;
+}
+
 function card(credential) {
+  const display = displayStatus(credential);
   const article = document.createElement("article");
-  const configuredAction = credential.protection_action || "notify_only";
-  article.append(
+  article.className = `credential-card status-${display.slug}`;
+  const top = document.createElement("div");
+  top.className = "card-heading";
+  const identity = document.createElement("div");
+  identity.append(
     text("p", credential.provider, "provider"),
     text("h3", credential.name),
     text("p", credential.masked_identifier, "masked"),
-    text("p", credential.paused ? "Paused" : credential.status, "status"),
-    text(
-      "p",
-      `Protection: ${configuredAction.replaceAll("_", " ")}`,
-      "masked",
-    ),
   );
+  const status = text("span", display.label, "status-badge");
+  top.append(identity, status);
+  article.append(top, progress(credential.usage));
+
+  const usage = credential.usage;
+  const schedule = credential.scheduler || {};
+  const metrics = document.createElement("dl");
+  metrics.className = "metrics";
+  metrics.append(
+    metric("Used", number(usage?.used, usage?.unit)),
+    metric("Remaining", number(usage?.remaining, usage?.unit)),
+    metric("Allocation", number(usage?.limit, usage?.unit)),
+    metric("Kill threshold", number(credential.threshold, usage?.unit)),
+    metric("Burn rate", credential.burn_rate_per_second !== null
+        && credential.burn_rate_per_second !== undefined
+      ? `${number(credential.burn_rate_per_second * 3600, usage?.unit)}/hour`
+      : "Not enough history"),
+    metric("Polling", duration(schedule.current_interval_seconds)),
+    metric("Last check", when(schedule.last_check_at || usage?.checked_at)),
+    metric("Next check", credential.paused ? "Paused" : when(schedule.next_check_at)),
+    metric("Auto Protect", credential.auto_protect ? "On" : "Off"),
+    metric("Provider action", (credential.protection_action || "notify_only").replaceAll("_", " ")),
+  );
+  article.append(metrics);
+
+  if (credential.last_action) {
+    article.append(text(
+      "p",
+      `Last protection: ${credential.last_action.result} · ${when(credential.last_action.created_at)}`,
+      "last-action",
+    ));
+  }
+
   const controls = document.createElement("div");
   controls.className = "controls";
-
-  const pause = text("button", credential.paused ? "Resume" : "Pause");
-  pause.type = "button";
-  pause.addEventListener("click", () => setPaused(credential.id, !credential.paused));
-
-  const remove = text("button", "Remove", "danger");
-  remove.type = "button";
-  remove.addEventListener("click", () => removeCredential(credential.id));
-
-  const check = text("button", "Check now");
-  check.type = "button";
+  const check = button("Check now");
   check.addEventListener("click", () => runAction(credential.id, "check"));
-
-  const protect = text("button", "Protect now", "danger");
-  protect.type = "button";
-  protect.disabled = !credential.available_actions.includes(configuredAction);
+  const pause = button(credential.paused ? "Resume" : "Pause", "secondary");
+  pause.addEventListener("click", () => setPaused(credential.id, !credential.paused));
+  const toggle = button(credential.auto_protect ? "Auto Protect off" : "Auto Protect on", "secondary");
+  toggle.addEventListener("click", () => patchCredential(
+    credential.id,
+    {auto_protect: !credential.auto_protect},
+    `Auto Protect turned ${credential.auto_protect ? "off" : "on"}.`,
+  ).catch(() => {}));
+  const protect = button("Protect now", "danger");
+  protect.disabled = !(credential.available_actions || []).includes(credential.protection_action);
   protect.addEventListener("click", () => runAction(credential.id, "protect"));
-
-  controls.append(check, pause, protect, remove);
-  article.append(controls);
+  const edit = button("Edit settings", "secondary");
+  const editor = editForm(credential);
+  edit.addEventListener("click", () => { editor.hidden = !editor.hidden; });
+  const remove = button("Remove", "ghost-danger");
+  remove.addEventListener("click", () => removeCredential(credential.id));
+  controls.append(check, pause, toggle, protect, edit, remove);
+  article.append(controls, editor, historyPanel(credential));
   return article;
 }
 
-async function loadCredentials() {
+function hasActiveInteraction() {
+  return credentialList.querySelector(".edit-form:not([hidden]), details[open]") !== null;
+}
+
+async function loadCredentials({quiet = false, background = false} = {}) {
+  if (background && hasActiveInteraction()) return;
   const sequence = ++loadSequence;
-  credentialList.replaceChildren(text("p", "Loading…"));
+  if (!quiet) credentialList.replaceChildren(text("p", "Loading daemon state…", "empty"));
   try {
     const {credentials} = await api("/api/credentials");
     if (sequence !== loadSequence) return;
-    if (!credentials.length) {
-      credentialList.replaceChildren(text("p", "No credentials are being watched yet.", "empty"));
-      return;
-    }
-    credentialList.replaceChildren(...credentials.map(card));
+    if (background && hasActiveInteraction()) return;
+    const ordered = [...credentials].sort(sortCredentials);
+    credentialCount.textContent = `${ordered.length} credential${ordered.length === 1 ? "" : "s"}`;
+    credentialList.replaceChildren(...(ordered.length
+      ? ordered.map(card)
+      : [text("p", "No credentials are being watched yet.", "empty")]));
   } catch (error) {
     if (sequence !== loadSequence) return;
     credentialList.replaceChildren(text("p", error.message, "error"));
@@ -131,7 +404,7 @@ form.addEventListener("submit", async (event) => {
   saving = true;
   const controls = [...form.elements];
   controls.forEach((control) => { control.disabled = true; });
-  message.textContent = "Saving…";
+  formMessage.textContent = "Saving…";
   const data = new FormData(form);
   const threshold = data.get("threshold");
   const body = {
@@ -147,17 +420,25 @@ form.addEventListener("submit", async (event) => {
   try {
     await api("/api/credentials", {method: "POST", body: JSON.stringify(body)});
     form.reset();
-    message.textContent = "Saved. The raw key was sent directly to GNOME Keyring.";
-    await loadCredentials();
+    formMessage.textContent = "Saved. The raw key was sent directly to GNOME Keyring.";
+    await loadCredentials({quiet: true});
   } catch (error) {
-    message.textContent = error.message;
+    formMessage.textContent = error.message;
   } finally {
     saving = false;
     controls.forEach((control) => { control.disabled = false; });
   }
 });
 
-document.querySelector("#refresh").addEventListener("click", loadCredentials);
+document.querySelector("#refresh").addEventListener("click", () => loadCredentials());
+document.querySelector("#test-notification").addEventListener("click", async () => {
+  try {
+    await api("/api/notifications/test", {method: "POST", body: "{}"});
+    showMessage("Test notification sent.");
+  } catch (error) {
+    showMessage(error.message, true);
+  }
+});
 
 async function start() {
   const bootstrap = new URLSearchParams(window.location.hash.slice(1)).get("token");
@@ -169,25 +450,21 @@ async function start() {
         headers: {Authorization: `KeyGuard-Bootstrap ${bootstrap}`},
       });
       const payload = await response.json();
-      if (!response.ok || !payload.session_token) {
-        throw new Error("KeyGuard authentication failed");
-      }
+      if (!response.ok || !payload.session_token) throw new Error("KeyGuard authentication failed");
       sessionToken = payload.session_token;
       window.sessionStorage.setItem("keyguardSession", sessionToken);
     } catch (error) {
-      message.textContent = error.message;
+      showMessage(error.message, true);
       return;
     }
   }
   if (!sessionToken) {
-    message.textContent = "Open KeyGuard from its launcher to authenticate.";
+    showMessage("Open KeyGuard from its launcher to authenticate.", true);
     return;
   }
-  try {
-    await loadCredentials();
-  } catch (error) {
-    message.textContent = error.message;
-  }
+  await loadCredentials();
+  window.setInterval(() => loadCredentials({quiet: true, background: true}), 30_000);
 }
 
 start();
+
