@@ -50,4 +50,3 @@ class ProviderAdapter(Protocol):
         self, action: str, secret: str, metadata: dict[str, Any]
     ) -> dict[str, Any]:
         pass
-

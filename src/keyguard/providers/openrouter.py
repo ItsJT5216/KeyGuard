@@ -168,4 +168,3 @@ class OpenRouterAdapter:
             raise ProviderError("OpenRouter did not verify the key as disabled")
         return {"action": "disable", "verified": True}
 
-

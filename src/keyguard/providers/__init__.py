@@ -55,4 +55,3 @@ class ProviderRegistry:
         result["capabilities"] = sorted(adapter.capabilities) if adapter else []
         result["available_actions"] = list(adapter.actions) if adapter else []
         return result
-

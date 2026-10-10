@@ -37,4 +37,3 @@ def applications_dir() -> Path:
         Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
         / "applications"
     )
-

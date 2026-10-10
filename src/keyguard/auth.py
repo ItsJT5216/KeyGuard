@@ -120,4 +120,3 @@ class SessionAuthority:
             for token, expiry in self._sessions.items()
             if expiry >= monotonic_now
         }
-
