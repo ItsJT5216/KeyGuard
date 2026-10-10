@@ -63,3 +63,4 @@ class KeyringVault:
             raise RuntimeError(
                 "Secret Service could not delete the credential"
             ) from exc
+

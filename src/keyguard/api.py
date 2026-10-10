@@ -463,7 +463,12 @@ def make_handler(
                         raise ApiError(
                             422, "NOTIFICATION_CONFIGURATION_ERROR", str(error)
                         ) from error
-                    config = store.update_notification_config(values)
+                    try:
+                        config = store.update_notification_config(values)
+                    except ValueError as error:
+                        raise ApiError(
+                            422, "NOTIFICATION_CONFIGURATION_ERROR", str(error)
+                        ) from error
                     self._json(200, {"notifications": config})
                     return
                 if len(segments) != 3 or segments[:2] != ["api", "credentials"]:
@@ -598,3 +603,4 @@ def create_server(
     server.scheduler_runner = scheduler_runner
     server.notifications = notifications
     return server
+

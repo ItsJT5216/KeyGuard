@@ -220,7 +220,8 @@ class AdaptiveScheduler:
         history = self.store.usage_history(credential_id)
         plan = self.plan(credential, snapshot, history)
         previous_state = self.store.get_scheduler_state(credential_id) or {}
-        previous_tier = previous_state.get("polling_tier")
+        previous_group = previous_state.get("notification_tier_group")
+        current_group = self._tier_group(plan.tier)
         checked_at = self._time(snapshot["checked_at"])
         next_check = checked_at + timedelta(seconds=plan.interval_seconds)
         self.store.set_scheduler_state(
@@ -230,8 +231,9 @@ class AdaptiveScheduler:
             current_interval_seconds=plan.interval_seconds,
             polling_tier=plan.tier,
             consecutive_failures=0,
+            notification_tier_group=current_group,
         )
-        self._notify_tier_transition(credential, snapshot, previous_tier, plan)
+        self._notify_tier_transition(credential, snapshot, previous_group, plan)
         return plan
 
     @staticmethod
@@ -247,18 +249,18 @@ class AdaptiveScheduler:
         self,
         credential: dict[str, Any],
         snapshot: dict[str, Any],
-        previous_tier: str | None,
+        previous_group: str | None,
         plan: PollingPlan,
     ) -> None:
         group = self._tier_group(plan.tier)
-        if group is None or group == self._tier_group(previous_tier):
+        if group is None or group == previous_group:
             return
         event = self.store.record_event(
             credential["id"],
             "polling_tier_changed",
             group,
             {
-                "from": previous_tier,
+                "from": previous_group,
                 "to": plan.tier,
                 "interval_seconds": plan.interval_seconds,
             },
@@ -287,6 +289,14 @@ class AdaptiveScheduler:
         snapshot = outcome.get("snapshot")
         if not isinstance(snapshot, dict):
             return None
+        credential = self.store.get_credential(credential_id)
+        if (
+            credential is None
+            or credential["paused"]
+            or credential["status"]
+            in {"disabled", "cleanup_required", "provisioning"}
+        ):
+            return None
         return self.schedule_snapshot(credential_id, snapshot)
 
     def schedule_now(self, credential_id: str) -> None:
@@ -313,6 +323,7 @@ class AdaptiveScheduler:
             current_interval_seconds=retry,
             polling_tier="error_retry",
             consecutive_failures=failures,
+            notification_tier_group=state.get("notification_tier_group"),
         )
         if failures == 3:
             credential = self.store.get_credential(credential_id)
@@ -402,4 +413,5 @@ class SchedulerRunner(threading.Thread):
                 timeout = 30.0
             if not self._stopped.is_set():
                 self.scheduler.wait(timeout=timeout)
+
 

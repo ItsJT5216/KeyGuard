@@ -136,3 +136,4 @@ input, select {
   #credential-form, .edit-form, .polling-grid { grid-template-columns: 1fr; }
   .metrics { grid-template-columns: 1fr; }
 }
+

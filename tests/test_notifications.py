@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -13,7 +14,11 @@ from typing import Any
 
 from keyguard.api import create_server
 from keyguard.auth import mint_bootstrap
-from keyguard.notifications import NtfyNotifier, NotificationError
+from keyguard.notifications import (
+    NotificationError,
+    NtfyNotifier,
+    validate_notification_config,
+)
 from keyguard.scheduler import AdaptiveScheduler
 from keyguard.store import Store
 
@@ -72,6 +77,25 @@ class NotificationTests(unittest.TestCase):
             }
         )
 
+    def test_default_public_topic_is_not_predictable(self) -> None:
+        topic = self.store.get_notification_config()["topic"]
+
+        self.assertTrue(topic.startswith("keyguard-"))
+        self.assertNotEqual("keyguard", topic)
+        self.assertGreaterEqual(len(topic), 24)
+
+    def test_dashboard_supports_token_removal_and_resilient_config_loading(
+        self,
+    ) -> None:
+        dashboard = Path(__file__).parents[1] / "src" / "keyguard" / "dashboard"
+        html = dashboard.joinpath("index.html").read_text()
+        javascript = dashboard.joinpath("app.js").read_text()
+
+        self.assertIn('name="clear_auth_token"', html)
+        self.assertIn('body.auth_token = null', javascript)
+        self.assertIn("try {\n    await loadNotificationConfig();", javascript)
+        self.assertIn("window.setInterval", javascript)
+
     def test_configuration_keeps_auth_secret_out_of_sqlite_and_api_shape(self) -> None:
         self.configure()
         config = self.store.get_notification_config()
@@ -96,6 +120,95 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual("https://ntfy.example/keyguard-home", request.full_url)
         self.assertEqual("Bearer ntfy-secret", request.get_header("Authorization"))
         self.assertEqual(10.0, timeout)
+
+    def test_notifier_reads_server_topic_and_token_as_one_snapshot(self) -> None:
+        class SnapshotStore:
+            def get_notification_delivery_config(self) -> dict[str, Any]:
+                return {
+                    "server_url": "https://new.example",
+                    "topic": "new-topic",
+                    "enabled": True,
+                    "auth_token": "new-token",
+                }
+
+        request = NtfyNotifier(SnapshotStore())._request(  # type: ignore[arg-type]
+            "test"
+        )
+
+        self.assertEqual("https://new.example/new-topic", request.full_url)
+        self.assertEqual("Bearer new-token", request.get_header("Authorization"))
+
+    def test_server_change_requires_explicit_token_replacement_or_removal(self) -> None:
+        self.configure()
+
+        with self.assertRaisesRegex(ValueError, "replaced or cleared"):
+            self.store.update_notification_config(
+                {"server_url": "https://other.example"}
+            )
+
+        self.store.update_notification_config(
+            {"server_url": "https://other.example", "auth_token": None}
+        )
+        config = self.store.get_notification_config()
+        self.assertEqual("https://other.example", config["server_url"])
+        self.assertFalse(config["auth_configured"])
+
+    def test_database_failure_restores_previous_keyring_token(self) -> None:
+        self.configure()
+        with self.store._db:
+            self.store._db.execute(
+                """
+                CREATE TRIGGER reject_notification_update
+                BEFORE UPDATE ON notification_config
+                BEGIN
+                    SELECT RAISE(ABORT, 'rejected');
+                END
+                """
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.update_notification_config(
+                {"topic": "new-topic", "auth_token": "replacement-token"}
+            )
+
+        self.assertEqual(
+            "ntfy-secret", self.vault.get("__notification_ntfy_auth__")
+        )
+        self.assertEqual("keyguard-home", self.store.get_notification_config()["topic"])
+
+    def test_invalid_urls_and_header_tokens_are_rejected(self) -> None:
+        invalid = (
+            "https://ntfy.example:abc",
+            "https://ntfy.example/path with space",
+            "https://user@ntfy.example",
+        )
+        for server_url in invalid:
+            with self.subTest(server_url=server_url):
+                with self.assertRaises(ValueError):
+                    validate_notification_config({"server_url": server_url})
+        with self.assertRaises(ValueError):
+            validate_notification_config({"auth_token": "unicode-🔑"})
+
+    def test_malformed_persisted_url_cannot_interrupt_source_event(self) -> None:
+        self.configure()
+        with self.store._db:
+            self.store._db.execute(
+                "UPDATE notification_config SET server_url = ? WHERE singleton = 1",
+                ("https://ntfy.example:abc",),
+            )
+        event = self.store.record_event(
+            self.credential["id"], "protection_action", "success", {}
+        )
+
+        delivered = NtfyNotifier(self.store).deliver_event(
+            self.credential, event, "protected", priority="high", tags="shield"
+        )
+
+        self.assertFalse(delivered)
+        history = self.store.history(self.credential["id"])
+        self.assertEqual("notification_delivery", history[0]["event_type"])
+        self.assertEqual("failed", history[0]["result"])
+        self.assertEqual("protection_action", history[1]["event_type"])
 
     def test_event_survives_failed_delivery_and_failure_is_also_recorded(self) -> None:
         self.configure()
@@ -194,6 +307,10 @@ class NotificationTests(unittest.TestCase):
         self.store.record_usage_snapshot(self.credential["id"], snapshot)
 
         scheduler.schedule_snapshot(self.credential["id"], snapshot)
+        scheduler.schedule_now(self.credential["id"])
+        scheduler._schedule_failure(
+            self.credential["id"], datetime(2026, 10, 9, tzinfo=UTC)
+        )
         scheduler.schedule_snapshot(self.credential["id"], snapshot)
 
         self.assertEqual(1, len(sent))
@@ -203,6 +320,43 @@ class NotificationTests(unittest.TestCase):
             if event["event_type"] == "polling_tier_changed"
         ]
         self.assertEqual(1, len(events))
+
+    def test_disabled_outcome_does_not_reschedule_or_emit_tier_alert(self) -> None:
+        self.configure()
+        sent: list[str] = []
+
+        def send(request: urllib.request.Request, _timeout: float) -> Response:
+            sent.append(request.data.decode())
+            return Response()
+
+        scheduler = AdaptiveScheduler(
+            self.store,
+            FakeProtection(),
+            jitter=lambda _low, _high: 0,
+            notifications=NtfyNotifier(self.store, sender=send),
+        )
+        snapshot = {
+            "checked_at": datetime(2026, 10, 9, tzinfo=UTC).isoformat(),
+            "used": 16,
+            "limit": 20,
+            "remaining": 4,
+            "unit": "USD",
+            "provider_status": {},
+        }
+        self.store.set_runtime_status(self.credential["id"], "disabled")
+
+        self.assertIsNone(
+            scheduler.schedule_outcome(self.credential["id"], {"snapshot": snapshot})
+        )
+        self.assertEqual([], sent)
+        self.assertIsNone(self.store.get_scheduler_state(self.credential["id"]))
+        self.assertNotIn(
+            "polling_tier_changed",
+            [
+                event["event_type"]
+                for event in self.store.history(self.credential["id"])
+            ],
+        )
 
     def test_repeated_failure_warns_on_third_failure_only(self) -> None:
         self.configure()
@@ -259,6 +413,7 @@ class NotificationTests(unittest.TestCase):
                         "server_url": "https://ntfy.example",
                         "topic": "home",
                         "enabled": True,
+                        "auth_token": "saved-token",
                     }
                 ).encode(),
                 method="PATCH",
@@ -267,6 +422,38 @@ class NotificationTests(unittest.TestCase):
             with urllib.request.urlopen(save) as response:
                 config = json.loads(response.read())["notifications"]
             self.assertTrue(config["enabled"])
+            self.assertTrue(config["auth_configured"])
+            unsafe_server_change = urllib.request.Request(
+                f"{base}/api/notifications",
+                data=json.dumps(
+                    {
+                        "server_url": "https://other.example",
+                        "topic": "home",
+                        "enabled": True,
+                    }
+                ).encode(),
+                method="PATCH",
+                headers=headers,
+            )
+            with self.assertRaises(urllib.error.HTTPError) as rejected:
+                urllib.request.urlopen(unsafe_server_change)
+            self.assertEqual(422, rejected.exception.code)
+            clear_token = urllib.request.Request(
+                f"{base}/api/notifications",
+                data=json.dumps(
+                    {
+                        "server_url": "https://ntfy.example",
+                        "topic": "home",
+                        "enabled": True,
+                        "auth_token": None,
+                    }
+                ).encode(),
+                method="PATCH",
+                headers=headers,
+            )
+            with urllib.request.urlopen(clear_token) as response:
+                cleared = json.loads(response.read())["notifications"]
+            self.assertFalse(cleared["auth_configured"])
             test = urllib.request.Request(
                 f"{base}/api/notifications/test",
                 data=b"{}",
@@ -284,3 +471,4 @@ class NotificationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

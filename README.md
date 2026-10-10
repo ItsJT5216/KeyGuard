@@ -37,8 +37,10 @@ remaining allocation, burn rate, polling interval, check times, protection mode,
 last protection result. Active credentials are ordered by the soonest provider reset
 when that information is available. Manual destructive actions require confirmation;
 automatic threshold protection continues without browser interaction. The notification
-test control reports that X-9 is not implemented until its real backend exists rather
-than displaying a false success.
+panel stores non-secret ntfy settings in SQLite and an optional bearer token in GNOME
+Keyring. Its test control sends a real message. Transition alerts are one-shot until the
+credential returns to a lower polling tier, while every source event remains in local
+history even when ntfy is unavailable.
 
 ## Adaptive polling
 
@@ -84,3 +86,4 @@ The test suite uses an in-memory fake vault; it never touches the real keyring.
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 -m compileall -q src tests
 ```
+

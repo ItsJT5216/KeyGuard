@@ -35,6 +35,7 @@
         <label>Server URL <input name="server_url" type="url" required maxlength="2048" autocomplete="url"></label>
         <label>Topic <input name="topic" required maxlength="128" autocomplete="off"></label>
         <label>Authentication token <input name="auth_token" type="password" maxlength="16384" autocomplete="new-password" placeholder="Leave blank to keep the saved token"></label>
+        <label class="check"><input name="clear_auth_token" type="checkbox"> Remove saved authentication token</label>
         <label class="check"><input name="enabled" type="checkbox"> Enable ntfy alerts</label>
         <button type="submit">Save ntfy settings</button>
       </form>
@@ -81,3 +82,4 @@
   </main>
 </body>
 </html>
+

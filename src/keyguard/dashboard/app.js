@@ -461,10 +461,12 @@ notificationForm.addEventListener("submit", async (event) => {
     enabled: data.get("enabled") === "on",
   };
   const authToken = data.get("auth_token");
-  if (authToken) body.auth_token = authToken;
+  if (data.get("clear_auth_token") === "on") body.auth_token = null;
+  else if (authToken) body.auth_token = authToken;
   try {
     await api("/api/notifications", {method: "PATCH", body: JSON.stringify(body)});
     notificationForm.elements.auth_token.value = "";
+    notificationForm.elements.clear_auth_token.checked = false;
     notificationMessage.textContent = "ntfy settings saved.";
     await loadNotificationConfig();
   } catch (error) {
@@ -495,9 +497,14 @@ async function start() {
     return;
   }
   await loadCredentials();
-  await loadNotificationConfig();
+  try {
+    await loadNotificationConfig();
+  } catch (error) {
+    notificationMessage.textContent = error.message;
+  }
   window.setInterval(() => loadCredentials({quiet: true, background: true}), 30_000);
 }
 
 start();
+
 

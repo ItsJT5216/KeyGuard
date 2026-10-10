@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable
+from http.client import HTTPException, InvalidURL
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
@@ -49,14 +49,21 @@ def validate_notification_config(value: Any) -> dict[str, Any]:
             raise ValueError("server_url must be text")
         server_url = server_url.strip().rstrip("/")
         parsed = urlparse(server_url)
+        try:
+            parsed.port
+        except ValueError as error:
+            raise ValueError(
+                "server_url must be an http(s) origin or base path"
+            ) from error
         if (
             len(server_url) > 2048
             or parsed.scheme not in {"http", "https"}
-            or not parsed.netloc
+            or not parsed.hostname
             or parsed.username
             or parsed.password
             or parsed.query
             or parsed.fragment
+            or any(ord(char) < 33 for char in server_url)
         ):
             raise ValueError("server_url must be an http(s) origin or base path")
         result["server_url"] = server_url
@@ -80,7 +87,7 @@ def validate_notification_config(value: Any) -> dict[str, Any]:
         if token is not None and (
             not isinstance(token, str)
             or len(token) > 16_384
-            or any(ord(char) < 32 for char in token)
+            or any(ord(char) < 33 or ord(char) > 126 for char in token)
         ):
             raise ValueError("auth_token is invalid")
         result["auth_token"] = token
@@ -105,7 +112,7 @@ class NtfyNotifier:
         priority: str = "default",
         tags: str = "shield",
     ) -> Request:
-        config = self.store.get_notification_config()
+        config = self.store.get_notification_delivery_config()
         if not config["enabled"]:
             raise NotificationError("ntfy notifications are disabled")
         topic = quote(config["topic"], safe="")
@@ -115,7 +122,7 @@ class NtfyNotifier:
             "Priority": priority,
             "Tags": tags,
         }
-        token = self.store.get_notification_secret()
+        token = config["auth_token"]
         if token:
             headers["Authorization"] = f"Bearer {token}"
         return Request(  # noqa: S310 - configured ntfy URL; redirects are rejected
@@ -133,8 +140,10 @@ class NtfyNotifier:
         priority: str = "default",
         tags: str = "shield",
     ) -> None:
-        request = self._request(message, title=title, priority=priority, tags=tags)
         try:
+            request = self._request(
+                message, title=title, priority=priority, tags=tags
+            )
             response = self._sender(request, 10.0)
             try:
                 status = getattr(response, "status", 200)
@@ -147,6 +156,8 @@ class NtfyNotifier:
         except HTTPError as exc:
             exc.close()
             raise NotificationError(f"ntfy returned HTTP {exc.code}") from exc
+        except (ValueError, InvalidURL, HTTPException) as exc:
+            raise NotificationError("ntfy configuration is invalid") from exc
         except (URLError, TimeoutError, OSError) as exc:
             raise NotificationError("ntfy is temporarily unavailable") from exc
 
@@ -189,3 +200,4 @@ class NtfyNotifier:
             {"source_event_id": event["id"]},
         )
         return True
+
