@@ -35,6 +35,31 @@ class FakeVault:
         self.secrets.pop(credential_id, None)
 
 
+class CapturingNotifications:
+    def __init__(self) -> None:
+        self.deliveries: list[dict[str, Any]] = []
+
+    def deliver_event(
+        self,
+        credential: dict[str, Any],
+        event: dict[str, Any] | None,
+        message: str,
+        *,
+        priority: str,
+        tags: str,
+    ) -> bool:
+        self.deliveries.append(
+            {
+                "credential": credential,
+                "event": event,
+                "message": message,
+                "priority": priority,
+                "tags": tags,
+            }
+        )
+        return True
+
+
 class RecordedTransport:
     def __init__(self, responses: list[dict[str, Any] | Exception]) -> None:
         self.responses = list(responses)
@@ -209,7 +234,10 @@ class OpenRouterProtectionTests(unittest.TestCase):
             ]
         )
         adapter = OpenRouterAdapter(transport)
-        service = ProtectionService(self.store, ProviderRegistry([adapter]))
+        notifications = CapturingNotifications()
+        service = ProtectionService(
+            self.store, ProviderRegistry([adapter]), notifications
+        )
         credential = self._credential()
 
         outcome = service.check(credential["id"])
@@ -228,6 +256,8 @@ class OpenRouterProtectionTests(unittest.TestCase):
         events = self.store.history(credential["id"])
         self.assertEqual("success", events[0]["result"])
         self.assertEqual("protection_action", events[0]["event_type"])
+        self.assertEqual("success", notifications.deliveries[0]["event"]["result"])
+        self.assertIn("was disabled", notifications.deliveries[0]["message"])
 
     def test_failed_provider_action_is_recorded_as_action_failed(self) -> None:
         transport = RecordedTransport(
@@ -237,8 +267,11 @@ class OpenRouterProtectionTests(unittest.TestCase):
                 ProviderError("OpenRouter returned HTTP 503"),
             ]
         )
+        notifications = CapturingNotifications()
         service = ProtectionService(
-            self.store, ProviderRegistry([OpenRouterAdapter(transport)])
+            self.store,
+            ProviderRegistry([OpenRouterAdapter(transport)]),
+            notifications,
         )
         credential = self._credential()
 
@@ -250,6 +283,10 @@ class OpenRouterProtectionTests(unittest.TestCase):
         )
         event = self.store.history(credential["id"])[0]
         self.assertEqual("action_failed", event["result"])
+        self.assertEqual(
+            "action_failed", notifications.deliveries[0]["event"]["result"]
+        )
+        self.assertIn("Manual action is required", notifications.deliveries[0]["message"])
 
     def test_second_read_below_threshold_cancels_protection(self) -> None:
         transport = RecordedTransport([key_payload(usage=5.1), key_payload(usage=4.9)])

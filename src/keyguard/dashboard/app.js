@@ -3,6 +3,8 @@ const credentialCount = document.querySelector("#credential-count");
 const form = document.querySelector("#credential-form");
 const formMessage = document.querySelector("#form-message");
 const globalMessage = document.querySelector("#global-message");
+const notificationForm = document.querySelector("#notification-form");
+const notificationMessage = document.querySelector("#notification-message");
 let sessionToken = window.sessionStorage.getItem("keyguardSession");
 let loadSequence = 0;
 let saving = false;
@@ -440,6 +442,38 @@ document.querySelector("#test-notification").addEventListener("click", async () 
   }
 });
 
+async function loadNotificationConfig() {
+  const {notifications} = await api("/api/notifications");
+  notificationForm.elements.server_url.value = notifications.server_url;
+  notificationForm.elements.topic.value = notifications.topic;
+  notificationForm.elements.enabled.checked = notifications.enabled;
+  notificationForm.elements.auth_token.placeholder = notifications.auth_configured
+    ? "Saved in GNOME Keyring; leave blank to keep it"
+    : "Optional bearer token";
+}
+
+notificationForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = new FormData(notificationForm);
+  const body = {
+    server_url: data.get("server_url"),
+    topic: data.get("topic"),
+    enabled: data.get("enabled") === "on",
+  };
+  const authToken = data.get("auth_token");
+  if (data.get("clear_auth_token") === "on") body.auth_token = null;
+  else if (authToken) body.auth_token = authToken;
+  try {
+    await api("/api/notifications", {method: "PATCH", body: JSON.stringify(body)});
+    notificationForm.elements.auth_token.value = "";
+    notificationForm.elements.clear_auth_token.checked = false;
+    notificationMessage.textContent = "ntfy settings saved.";
+    await loadNotificationConfig();
+  } catch (error) {
+    notificationMessage.textContent = error.message;
+  }
+});
+
 async function start() {
   const bootstrap = new URLSearchParams(window.location.hash.slice(1)).get("token");
   history.replaceState(null, "", `${location.pathname}${location.search}`);
@@ -463,8 +497,14 @@ async function start() {
     return;
   }
   await loadCredentials();
+  try {
+    await loadNotificationConfig();
+  } catch (error) {
+    notificationMessage.textContent = error.message;
+  }
   window.setInterval(() => loadCredentials({quiet: true, background: true}), 30_000);
 }
 
 start();
+
 

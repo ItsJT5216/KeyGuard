@@ -8,14 +8,21 @@ from typing import Any
 from .providers import ProviderRegistry
 from .providers.base import ProviderError, UsageSnapshot
 from .store import Store
+from .notifications import NtfyNotifier
 
 
 class ProtectionService:
     _LOCK_STRIPES = 64
 
-    def __init__(self, store: Store, providers: ProviderRegistry) -> None:
+    def __init__(
+        self,
+        store: Store,
+        providers: ProviderRegistry,
+        notifications: NtfyNotifier | None = None,
+    ) -> None:
         self.store = store
         self.providers = providers
+        self.notifications = notifications
         self._credential_locks = tuple(
             threading.RLock() for _ in range(self._LOCK_STRIPES)
         )
@@ -80,6 +87,21 @@ class ProtectionService:
         threshold = credential["threshold"]
         if first.provider_status.get("disabled") is True:
             self.store.set_runtime_status(credential_id, "disabled")
+            if credential["status"] != "disabled":
+                event = self.store.record_event(
+                    credential_id,
+                    "credential_invalid_or_revoked",
+                    "disabled_externally",
+                    {},
+                )
+                if self.notifications is not None:
+                    self.notifications.deliver_event(
+                        credential,
+                        event,
+                        f"{credential['name']} is disabled at the provider.",
+                        priority="high",
+                        tags="warning,lock",
+                    )
             return {
                 "snapshot": first.as_dict(),
                 "threshold_crossed": threshold is not None and first.used >= threshold,
@@ -183,21 +205,44 @@ class ProtectionService:
             )
         except ProviderError:
             self.store.set_runtime_status(credential_id, "action_failed")
-            self.store.record_event(
+            event = self.store.record_event(
                 credential_id,
                 "protection_action",
                 "action_failed",
                 {"action": credential["protection_action"]},
             )
+            if self.notifications is not None:
+                self.notifications.deliver_event(
+                    credential,
+                    event,
+                    f"Unable to {credential['protection_action']} {credential['name']}. "
+                    "Manual action is required.",
+                    priority="urgent",
+                    tags="x,rotating_light",
+                )
             raise
 
         self.store.set_runtime_status(credential_id, "disabled")
-        self.store.record_event(
+        event = self.store.record_event(
             credential_id,
             "protection_action",
             "success",
             {"action": credential["protection_action"], "verified": True},
         )
+        if self.notifications is not None:
+            threshold_text = (
+                f"{threshold:g} {verified.unit}"
+                if isinstance(threshold, (int, float))
+                else "the manual protection request"
+            )
+            self.notifications.deliver_event(
+                credential,
+                event,
+                f"{credential['name']} was {credential['protection_action']}d "
+                f"at {verified.used:g} {verified.unit}; trigger: {threshold_text}.",
+                priority="high",
+                tags="fire,shield",
+            )
         return {
             "snapshot": verified.as_dict(),
             "threshold_crossed": True,

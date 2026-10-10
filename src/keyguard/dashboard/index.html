@@ -23,6 +23,25 @@
 
     <p id="global-message" class="message" role="status" aria-live="polite"></p>
 
+    <section aria-labelledby="notifications-title" class="add-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">PUSH ALERTS</p>
+          <h2 id="notifications-title">ntfy notifications</h2>
+        </div>
+        <p class="muted">Alerts are sent only for meaningful transitions and protection events.</p>
+      </div>
+      <form id="notification-form">
+        <label>Server URL <input name="server_url" type="url" required maxlength="2048" autocomplete="url"></label>
+        <label>Topic <input name="topic" required maxlength="128" autocomplete="off"></label>
+        <label>Authentication token <input name="auth_token" type="password" maxlength="16384" autocomplete="new-password" placeholder="Leave blank to keep the saved token"></label>
+        <label class="check"><input name="clear_auth_token" type="checkbox"> Remove saved authentication token</label>
+        <label class="check"><input name="enabled" type="checkbox"> Enable ntfy alerts</label>
+        <button type="submit">Save ntfy settings</button>
+      </form>
+      <p id="notification-message" class="message" role="status" aria-live="polite"></p>
+    </section>
+
     <section aria-labelledby="keys-title">
       <div class="section-heading">
         <div>
@@ -63,3 +82,4 @@
   </main>
 </body>
 </html>
+

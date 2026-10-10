@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 import threading
 import uuid
@@ -134,10 +135,41 @@ class Store:
                     next_check_at TEXT,
                     current_interval_seconds INTEGER,
                     polling_tier TEXT,
+                    notification_tier_group TEXT,
                     consecutive_failures INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY (credential_id) REFERENCES credentials(id) ON DELETE CASCADE
                 )
                 """
+            )
+            scheduler_columns = {
+                row["name"]
+                for row in self._db.execute(
+                    "PRAGMA table_info(scheduler_state)"
+                ).fetchall()
+            }
+            if "notification_tier_group" not in scheduler_columns:
+                self._db.execute(
+                    "ALTER TABLE scheduler_state ADD COLUMN notification_tier_group TEXT"
+                )
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_config (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    server_url TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            default_topic = f"keyguard-{secrets.token_urlsafe(18)}"
+            self._db.execute(
+                """
+                INSERT OR IGNORE INTO notification_config
+                    (singleton, server_url, topic, enabled, updated_at)
+                VALUES (1, 'https://ntfy.sh', ?, 0, ?)
+                """,
+                (default_topic, utc_now()),
             )
 
     def _recover_incomplete_credentials(self) -> None:
@@ -501,20 +533,23 @@ class Store:
         current_interval_seconds: int | None,
         polling_tier: str | None,
         consecutive_failures: int,
+        notification_tier_group: str | None = None,
     ) -> None:
         with self._lock, self._db:
             self._db.execute(
                 """
                 INSERT INTO scheduler_state
                     (credential_id, last_check_at, next_check_at,
-                     current_interval_seconds, polling_tier, consecutive_failures)
-                VALUES (?, ?, ?, ?, ?, ?)
+                     current_interval_seconds, polling_tier, consecutive_failures,
+                     notification_tier_group)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(credential_id) DO UPDATE SET
                     last_check_at = excluded.last_check_at,
                     next_check_at = excluded.next_check_at,
                     current_interval_seconds = excluded.current_interval_seconds,
                     polling_tier = excluded.polling_tier,
-                    consecutive_failures = excluded.consecutive_failures
+                    consecutive_failures = excluded.consecutive_failures,
+                    notification_tier_group = excluded.notification_tier_group
                 """,
                 (
                     credential_id,
@@ -523,6 +558,7 @@ class Store:
                     current_interval_seconds,
                     polling_tier,
                     consecutive_failures,
+                    notification_tier_group,
                 ),
             )
 
@@ -535,6 +571,7 @@ class Store:
             current_interval_seconds=0,
             polling_tier="due",
             consecutive_failures=int(state.get("consecutive_failures", 0)),
+            notification_tier_group=state.get("notification_tier_group"),
         )
 
     def due_credentials(self, now: str) -> list[dict[str, Any]]:
@@ -673,3 +710,76 @@ class Store:
                 "SELECT DISTINCT provider FROM credentials ORDER BY provider COLLATE NOCASE"
             ).fetchall()
         return [{"id": row["provider"], "capabilities": []} for row in rows]
+
+    def get_notification_delivery_config(self) -> dict[str, Any]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT server_url, topic, enabled, updated_at "
+                "FROM notification_config WHERE singleton = 1"
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Notification configuration is unavailable")
+            auth_token = self.vault.get("__notification_ntfy_auth__")
+        return {
+            "server_url": row["server_url"],
+            "topic": row["topic"],
+            "enabled": bool(row["enabled"]),
+            "auth_token": auth_token,
+            "updated_at": row["updated_at"],
+        }
+
+    def get_notification_config(self) -> dict[str, Any]:
+        config = self.get_notification_delivery_config()
+        auth_token = config.pop("auth_token")
+        config["auth_configured"] = auth_token is not None
+        return config
+
+    def update_notification_config(
+        self, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        secret_id = "__notification_ntfy_auth__"
+        with self._lock:
+            row = self._db.execute(
+                "SELECT server_url, topic, enabled FROM notification_config "
+                "WHERE singleton = 1"
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Notification configuration is unavailable")
+            previous_token = self.vault.get(secret_id)
+            server_url = values.get("server_url", row["server_url"])
+            topic = values.get("topic", row["topic"])
+            enabled = values.get("enabled", bool(row["enabled"]))
+            token_supplied = "auth_token" in values
+            auth_token = values.get("auth_token")
+            if (
+                server_url != row["server_url"]
+                and previous_token is not None
+                and not token_supplied
+            ):
+                raise ValueError(
+                    "auth_token must be replaced or cleared when server_url changes"
+                )
+            if token_supplied:
+                if auth_token:
+                    self.vault.set(secret_id, auth_token)
+                else:
+                    self.vault.delete(secret_id)
+            try:
+                with self._db:
+                    self._db.execute(
+                        """
+                        UPDATE notification_config
+                        SET server_url = ?, topic = ?, enabled = ?, updated_at = ?
+                        WHERE singleton = 1
+                        """,
+                        (server_url, topic, int(enabled), utc_now()),
+                    )
+            except Exception:
+                if token_supplied:
+                    if previous_token is None:
+                        self.vault.delete(secret_id)
+                    else:
+                        self.vault.set(secret_id, previous_token)
+                raise
+        return self.get_notification_config()
+
