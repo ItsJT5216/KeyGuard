@@ -22,9 +22,12 @@ def _copy_file(source: Path, destination: Path, mode: int = 0o644) -> None:
 
 
 def _normalize_tree(root: Path, timestamp: int) -> None:
-    for path in sorted(root.rglob("*"), reverse=True):
+    paths = [root, *sorted(root.rglob("*"))]
+    for path in paths:
+        if path.is_dir():
+            path.chmod(0o755)
+    for path in reversed(paths):
         os.utime(path, (timestamp, timestamp), follow_symlinks=False)
-    os.utime(root, (timestamp, timestamp), follow_symlinks=False)
 
 
 def _stage(package_root: Path, version: str, timestamp: int) -> None:
@@ -61,6 +64,10 @@ def _stage(package_root: Path, version: str, timestamp: int) -> None:
         ROOT / "packaging" / "keyguard.desktop",
         package_root / "usr" / "share" / "applications" / "keyguard.desktop",
     )
+    _copy_file(
+        ROOT / "LICENSE",
+        package_root / "usr" / "share" / "doc" / "keyguard" / "copyright",
+    )
 
     control = package_root / "DEBIAN" / "control"
     control.parent.mkdir(parents=True, exist_ok=True)
@@ -70,8 +77,8 @@ def _stage(package_root: Path, version: str, timestamp: int) -> None:
         "Section: utils\n"
         "Priority: optional\n"
         "Architecture: all\n"
-        "Depends: python3 (>= 3.11), python3-keyring (>= 25)\n"
-        "Maintainer: Tanner Haywood\n"
+        "Depends: python3 (>= 3.11), python3-keyring (>= 24.3.1)\n"
+        "Maintainer: Tanner Haywood <jacobthaywood@icloud.com>\n"
         "Description: Local-first API credit protection daemon\n"
         " KeyGuard monitors provider usage from a loopback-only daemon and protects\n"
         " configured credentials when their thresholds are crossed.\n"
@@ -124,3 +131,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

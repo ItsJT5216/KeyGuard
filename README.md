@@ -28,16 +28,23 @@ The package installs `/usr/bin/keyguard`, the Python application under
 `/usr/lib/keyguard`, dashboard assets under `/usr/share/keyguard/dashboard`, the
 user service at `/usr/lib/systemd/user/keyguard.service`, and the launcher at
 `/usr/share/applications/keyguard.desktop`. `keyguard install` creates the owner
-token, reloads the user systemd manager, enables the service for future logins,
-and starts it immediately. The launcher runs `keyguard open`, so it reuses the
-enabled daemon instead of starting a second server.
+token, safely replaces an older KeyGuard-generated per-user unit, reloads the
+user systemd manager, enables the packaged service for future logins, and starts
+it immediately. A custom per-user unit is never overwritten. The launcher runs
+`keyguard open`, so it reuses the enabled daemon instead of starting a second
+server.
 
 To remove the installed application while preserving the current user's SQLite
 configuration and GNOME Keyring secrets:
 
 ```bash
+keyguard uninstall
 sudo apt remove keyguard
 ```
+
+`keyguard uninstall` stops and disables the user service before the executable
+is removed. It does not delete configuration, SQLite history, or keyring
+secrets.
 
 Reinstalling the package and running `keyguard install` reconnects to that
 preserved state. The release verification steps, including login, reboot,
@@ -120,4 +127,5 @@ The test suite uses an in-memory fake vault; it never touches the real keyring.
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 -m compileall -q src tests
 ```
+
 
