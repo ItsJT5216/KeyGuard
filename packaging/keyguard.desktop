@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=KeyGuard
+Comment=Open the KeyGuard API credit dashboard
+Exec=/usr/bin/keyguard open
+Terminal=false
+Categories=Utility;Security;
+StartupNotify=true

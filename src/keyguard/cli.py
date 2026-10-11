@@ -135,15 +135,26 @@ def _desktop_quote(path: str) -> str:
     return f'"{escaped}"'
 
 
-def install() -> None:
-    python = os.path.abspath(sys.executable)
-    load_or_create_token(auth_token_path())
-    service_dir = systemd_user_dir()
-    app_dir = applications_dir()
-    service_dir.mkdir(parents=True, exist_ok=True)
-    app_dir.mkdir(parents=True, exist_ok=True)
+def _installed_executable() -> str | None:
+    configured = os.environ.get("KEYGUARD_EXECUTABLE")
+    if configured is None:
+        return None
+    if not os.path.isabs(configured):
+        raise SystemExit("KEYGUARD_EXECUTABLE must be an absolute path")
+    return os.path.normpath(configured)
 
-    service = f"""[Unit]
+
+def install() -> None:
+    executable = _installed_executable()
+    load_or_create_token(auth_token_path())
+    if executable is None:
+        python = os.path.abspath(sys.executable)
+        service_dir = systemd_user_dir()
+        app_dir = applications_dir()
+        service_dir.mkdir(parents=True, exist_ok=True)
+        app_dir.mkdir(parents=True, exist_ok=True)
+
+        service = f"""[Unit]
 Description=KeyGuard API credit protection daemon
 After=graphical-session.target
 Wants=graphical-session.target
@@ -160,7 +171,7 @@ UMask=0077
 [Install]
 WantedBy=default.target
 """
-    desktop = f"""[Desktop Entry]
+        desktop = f"""[Desktop Entry]
 Type=Application
 Name=KeyGuard
 Comment=Open the KeyGuard API credit dashboard
@@ -169,12 +180,16 @@ Terminal=false
 Categories=Utility;Security;
 StartupNotify=true
 """
-    service_path = service_dir / "keyguard.service"
-    desktop_path = app_dir / "dev.tanner.KeyGuard.desktop"
-    service_path.write_text(service)
-    desktop_path.write_text(desktop)
-    service_path.chmod(0o600)
-    desktop_path.chmod(0o644)
+        service_path = service_dir / "keyguard.service"
+        desktop_path = app_dir / "dev.tanner.KeyGuard.desktop"
+        service_path.write_text(service)
+        desktop_path.write_text(desktop)
+        service_path.chmod(0o600)
+        desktop_path.chmod(0o644)
+    else:
+        service_path = "/usr/lib/systemd/user/keyguard.service"
+        desktop_path = "/usr/share/applications/keyguard.desktop"
+
     systemctl = _systemctl()
     subprocess.run(  # noqa: S603 - systemctl is resolved to an absolute path
         [systemctl, "--user", "daemon-reload"], check=True
@@ -185,8 +200,12 @@ StartupNotify=true
     subprocess.run(  # noqa: S603 - systemctl is resolved to an absolute path
         [systemctl, "--user", "restart", "keyguard.service"], check=True
     )
-    print(f"Installed {service_path}")
-    print(f"Installed {desktop_path}")
+    if executable is None:
+        print(f"Installed {service_path}")
+        print(f"Installed {desktop_path}")
+    else:
+        print(f"Activated {service_path}")
+        print(f"Desktop launcher: {desktop_path}")
 
 
 def parser() -> argparse.ArgumentParser:

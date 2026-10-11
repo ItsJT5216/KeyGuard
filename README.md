@@ -14,7 +14,37 @@ The current implementation includes the [X-5 foundation](https://linear.app/itst
 - ntfy alerts for tier transitions, repeated provider failures, externally disabled credentials, and verified protection results;
 - a user-service installer and desktop launcher.
 
-## Install for the current user
+## Install on Ubuntu
+
+Build a reproducible Debian package from the source checkout and install it:
+
+```bash
+SOURCE_DATE_EPOCH=0 python3 packaging/build_deb.py
+sudo apt install ./dist/keyguard_0.1.0_all.deb
+keyguard install
+```
+
+The package installs `/usr/bin/keyguard`, the Python application under
+`/usr/lib/keyguard`, dashboard assets under `/usr/share/keyguard/dashboard`, the
+user service at `/usr/lib/systemd/user/keyguard.service`, and the launcher at
+`/usr/share/applications/keyguard.desktop`. `keyguard install` creates the owner
+token, reloads the user systemd manager, enables the service for future logins,
+and starts it immediately. The launcher runs `keyguard open`, so it reuses the
+enabled daemon instead of starting a second server.
+
+To remove the installed application while preserving the current user's SQLite
+configuration and GNOME Keyring secrets:
+
+```bash
+sudo apt remove keyguard
+```
+
+Reinstalling the package and running `keyguard install` reconnects to that
+preserved state. The release verification steps, including login, reboot,
+upgrade, removal, and reinstall checks, are in
+[`packaging/TEST-MATRIX.md`](packaging/TEST-MATRIX.md).
+
+## Install from Python for the current user
 
 ```bash
 python3 -m venv ~/.local/share/keyguard/venv
@@ -22,7 +52,11 @@ python3 -m venv ~/.local/share/keyguard/venv
 ~/.local/share/keyguard/venv/bin/keyguard install
 ```
 
-`keyguard install` writes a service to `~/.config/systemd/user/keyguard.service`, writes the desktop entry, reloads systemd, and enables the daemon. The generated unit uses the exact interpreter that installed KeyGuard.
+For a Python installation, `keyguard install` writes a service to
+`~/.config/systemd/user/keyguard.service`, writes the desktop entry, reloads
+systemd, and enables the daemon. The generated unit uses the exact interpreter
+that installed KeyGuard. For the Debian package it activates the packaged unit
+and launcher instead of writing per-user copies.
 
 Open the dashboard with:
 
