@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
+from pathlib import Path
 from string import hexdigits
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -34,6 +36,13 @@ STATIC_FILES = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
 }
+
+
+def _dashboard_resource(resource_name: str):
+    installed_directory = os.environ.get("KEYGUARD_DASHBOARD_DIR")
+    if installed_directory:
+        return Path(installed_directory) / resource_name
+    return files("keyguard.dashboard").joinpath(resource_name)
 
 
 class ApiError(Exception):
@@ -257,7 +266,7 @@ def make_handler(
                 path = urlparse(self.path).path
                 if path in STATIC_FILES:
                     resource_name, content_type = STATIC_FILES[path]
-                    resource = files("keyguard.dashboard").joinpath(resource_name)
+                    resource = _dashboard_resource(resource_name)
                     body = resource.read_bytes()
                     self.send_response(200)
                     self.send_header("Content-Type", content_type)
