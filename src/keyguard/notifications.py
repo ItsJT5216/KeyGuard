@@ -180,6 +180,8 @@ class NtfyNotifier:
     ) -> bool:
         if event is None:
             return False
+        if credential.get("notifications_muted", False):
+            return False
         try:
             if not self.store.get_notification_config()["enabled"]:
                 return False

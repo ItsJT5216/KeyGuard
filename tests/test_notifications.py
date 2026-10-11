@@ -281,6 +281,34 @@ class NotificationTests(unittest.TestCase):
             [item["event_type"] for item in self.store.history(self.credential["id"])],
         )
 
+    def test_muted_credential_does_not_attempt_or_record_delivery(self) -> None:
+        self.configure()
+        muted = self.store.update_credential(
+            self.credential["id"], {"notifications_muted": True}
+        )
+        attempts: list[str] = []
+        event = self.store.record_event(
+            self.credential["id"], "polling_tier_changed", "accelerated", {}
+        )
+
+        delivered = NtfyNotifier(
+            self.store,
+            sender=lambda request, _timeout: attempts.append(request.full_url),
+        ).deliver_event(
+            muted,
+            event,
+            "warning",
+            priority="default",
+            tags="warning",
+        )
+
+        self.assertFalse(delivered)
+        self.assertEqual([], attempts)
+        self.assertNotIn(
+            "notification_delivery",
+            [item["event_type"] for item in self.store.history(self.credential["id"])],
+        )
+
     def test_tier_transition_notifies_once_until_tier_changes(self) -> None:
         self.configure()
         sent: list[str] = []
