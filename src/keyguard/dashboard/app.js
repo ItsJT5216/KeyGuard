@@ -284,7 +284,7 @@ function editForm(credential) {
         notifications_muted: data.get("notifications_muted") === "on",
         protection_action: data.get("protection_action"),
         polling,
-      }, "Credential settings saved and an immediate check was scheduled.");
+      }, "Credential settings saved.");
     } finally {
       save.disabled = false;
     }

@@ -549,10 +549,19 @@ def make_handler(
                     values["provider"] = provider
                     values["provider_metadata"] = metadata
                     values["protection_action"] = action
+                    comparison_current = dict(current)
+                    comparison_current["polling_config"] = normalize_polling_config(
+                        current["polling_config"]
+                    )
+                    should_schedule_check = "api_key" in values or any(
+                        field != "notifications_muted"
+                        and comparison_current.get(field) != value
+                        for field, value in values.items()
+                    )
                     credential = store.update_credential(credential_id, values)
                     if credential is None:
                         raise ApiError(404, "NOT_FOUND", "Credential not found")
-                    if set(body) != {"notifications_muted"}:
+                    if should_schedule_check:
                         scheduler.schedule_now(credential_id)
                 self._json(200, {"credential": self._credential_payload(credential)})
             except ApiError as error:
