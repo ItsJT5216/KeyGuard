@@ -794,6 +794,12 @@ class FoundationTests(unittest.TestCase):
             with urllib.request.urlopen(create_request) as response:
                 created = json.loads(response.read())["credential"]
 
+            with sqlite3.connect(self.path) as database:
+                database.execute(
+                    "UPDATE credentials SET polling_config_json = '{}' WHERE id = ?",
+                    (created["id"],),
+                )
+
             with patch.object(server.scheduler, "schedule_now") as schedule_now:
                 mute_request = urllib.request.Request(
                     f"{base}/api/credentials/{created['id']}",
