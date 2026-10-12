@@ -552,7 +552,8 @@ def make_handler(
                     credential = store.update_credential(credential_id, values)
                     if credential is None:
                         raise ApiError(404, "NOT_FOUND", "Credential not found")
-                    scheduler.schedule_now(credential_id)
+                    if set(body) != {"notifications_muted"}:
+                        scheduler.schedule_now(credential_id)
                 self._json(200, {"credential": self._credential_payload(credential)})
             except ApiError as error:
                 self._error(error)

@@ -720,6 +720,53 @@ class FoundationTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_api_notification_mute_only_update_keeps_existing_schedule(self) -> None:
+        token = "test-token-that-is-long-enough-123456"
+        server = create_server(self.store, token, 0)
+        session = authorize(server)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            create_request = urllib.request.Request(
+                f"{base}/api/credentials",
+                data=json.dumps(
+                    {
+                        "provider": "Example",
+                        "name": "Muted without rescheduling",
+                        "api_key": "secret",
+                        "threshold": 10,
+                    }
+                ).encode(),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"KeyGuard-Session {session}",
+                },
+            )
+            with urllib.request.urlopen(create_request) as response:
+                created = json.loads(response.read())["credential"]
+
+            with patch.object(server.scheduler, "schedule_now") as schedule_now:
+                mute_request = urllib.request.Request(
+                    f"{base}/api/credentials/{created['id']}",
+                    data=json.dumps({"notifications_muted": True}).encode(),
+                    method="PATCH",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"KeyGuard-Session {session}",
+                    },
+                )
+                with urllib.request.urlopen(mute_request) as response:
+                    updated = json.loads(response.read())["credential"]
+
+            self.assertTrue(updated["notifications_muted"])
+            schedule_now.assert_not_called()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_vault_and_database_update_are_serialized(self) -> None:
         self.store.close()
         vault = BlockingVault()
