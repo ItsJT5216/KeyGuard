@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -97,6 +98,24 @@ class FoundationTests(unittest.TestCase):
         reopened = self.store.get_credential(credential_id)
         self.assertEqual("Primary", reopened["name"])
         self.assertNotIn("api_key", reopened)
+
+    def test_existing_database_defaults_credentials_to_notifications_active(self) -> None:
+        created = self.store.create_credential(
+            provider="Example",
+            name="Existing",
+            secret="safe-secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        self.store.close()
+        with sqlite3.connect(self.path) as database:
+            database.execute("ALTER TABLE credentials DROP COLUMN notifications_muted")
+        self.store = Store(self.path, self.vault)
+
+        reopened = self.store.get_credential(created["id"])
+
+        self.assertIsNotNone(reopened)
+        self.assertFalse(reopened["notifications_muted"])
 
     def test_parameterized_values_do_not_escape_sql(self) -> None:
         created = self.store.create_credential(
@@ -560,6 +579,8 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("credential.status)", script)
         self.assertIn('"action_failed"', script)
         self.assertIn("credential.burn_rate_per_second !== null", script)
+        self.assertIn('credential.notifications_muted ? "Muted" : "Active"', script)
+        self.assertIn("{notifications_muted: !credential.notifications_muted}", script)
         self.assertIn('method: "PATCH"', script)
         self.assertIn("limit_reset", script)
 
@@ -613,6 +634,7 @@ class FoundationTests(unittest.TestCase):
                 "threshold": 20,
                 "metadata": {"key_hash": "a" * 64},
                 "protection_action": "disable",
+                "notifications_muted": True,
                 "polling": {
                     "quiet_interval_seconds": 7200,
                     "watch_interval_seconds": 1800,
@@ -636,10 +658,16 @@ class FoundationTests(unittest.TestCase):
             self.assertEqual(321, created["polling_config"]["safety_margin_seconds"])
             self.assertEqual(0.1, created["polling_config"]["jitter_fraction"])
             self.assertEqual("due", created["scheduler"]["polling_tier"])
+            self.assertTrue(created["notifications_muted"])
 
             patch_request = urllib.request.Request(
                 f"{base}/api/credentials/{created['id']}",
-                data=json.dumps({"polling": {"quiet_interval_seconds": 6000}}).encode(),
+                data=json.dumps(
+                    {
+                        "notifications_muted": False,
+                        "polling": {"quiet_interval_seconds": 6000},
+                    }
+                ).encode(),
                 method="PATCH",
                 headers={
                     "Content-Type": "application/json",
@@ -651,6 +679,7 @@ class FoundationTests(unittest.TestCase):
             self.assertEqual(6000, updated["polling_config"]["quiet_interval_seconds"])
             self.assertEqual(321, updated["polling_config"]["safety_margin_seconds"])
             self.assertEqual(0.1, updated["polling_config"]["jitter_fraction"])
+            self.assertFalse(updated["notifications_muted"])
 
             for index in range(15):
                 self.store.record_event(created["id"], "test_event", str(index))
@@ -686,6 +715,53 @@ class FoundationTests(unittest.TestCase):
                 urllib.request.urlopen(rejected)
             self.assertEqual(422, context.exception.code)
             context.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_api_notification_mute_only_update_keeps_existing_schedule(self) -> None:
+        token = "test-token-that-is-long-enough-123456"
+        server = create_server(self.store, token, 0)
+        session = authorize(server)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            create_request = urllib.request.Request(
+                f"{base}/api/credentials",
+                data=json.dumps(
+                    {
+                        "provider": "Example",
+                        "name": "Muted without rescheduling",
+                        "api_key": "secret",
+                        "threshold": 10,
+                    }
+                ).encode(),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"KeyGuard-Session {session}",
+                },
+            )
+            with urllib.request.urlopen(create_request) as response:
+                created = json.loads(response.read())["credential"]
+
+            with patch.object(server.scheduler, "schedule_now") as schedule_now:
+                mute_request = urllib.request.Request(
+                    f"{base}/api/credentials/{created['id']}",
+                    data=json.dumps({"notifications_muted": True}).encode(),
+                    method="PATCH",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"KeyGuard-Session {session}",
+                    },
+                )
+                with urllib.request.urlopen(mute_request) as response:
+                    updated = json.loads(response.read())["credential"]
+
+            self.assertTrue(updated["notifications_muted"])
+            schedule_now.assert_not_called()
         finally:
             server.shutdown()
             server.server_close()

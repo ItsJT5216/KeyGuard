@@ -365,6 +365,7 @@ def make_handler(
                         "api_key",
                         "threshold",
                         "auto_protect",
+                        "notifications_muted",
                         "metadata",
                         "protection_action",
                         "polling",
@@ -394,6 +395,10 @@ def make_handler(
                         secret=secret,
                         threshold=_threshold(body.get("threshold")),
                         auto_protect=_boolean(body.get("auto_protect"), "auto_protect"),
+                        notifications_muted=_boolean(
+                            body.get("notifications_muted"),
+                            "notifications_muted",
+                        ),
                         provider_metadata=metadata,
                         protection_action=action,
                         polling_config=normalize_polling_config(body.get("polling")),
@@ -489,6 +494,7 @@ def make_handler(
                     "api_key",
                     "threshold",
                     "auto_protect",
+                    "notifications_muted",
                     "metadata",
                     "protection_action",
                     "polling",
@@ -507,6 +513,10 @@ def make_handler(
                 if "auto_protect" in body:
                     values["auto_protect"] = _boolean(
                         body["auto_protect"], "auto_protect"
+                    )
+                if "notifications_muted" in body:
+                    values["notifications_muted"] = _boolean(
+                        body["notifications_muted"], "notifications_muted"
                     )
                 if "metadata" in body:
                     values["provider_metadata"] = _metadata(body["metadata"])
@@ -542,7 +552,8 @@ def make_handler(
                     credential = store.update_credential(credential_id, values)
                     if credential is None:
                         raise ApiError(404, "NOT_FOUND", "Credential not found")
-                    scheduler.schedule_now(credential_id)
+                    if set(body) != {"notifications_muted"}:
+                        scheduler.schedule_now(credential_id)
                 self._json(200, {"credential": self._credential_payload(credential)})
             except ApiError as error:
                 self._error(error)

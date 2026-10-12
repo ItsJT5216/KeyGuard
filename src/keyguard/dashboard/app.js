@@ -241,12 +241,25 @@ function editForm(credential) {
   const autoLabel = text("label", "Auto Protect", "check");
   autoLabel.prepend(autoProtect);
 
+  const notificationsMuted = document.createElement("input");
+  notificationsMuted.name = "notifications_muted";
+  notificationsMuted.type = "checkbox";
+  notificationsMuted.checked = credential.notifications_muted;
+  const notificationsLabel = text("label", "Mute alerts", "check");
+  notificationsLabel.prepend(notificationsMuted);
+
   const save = text("button", "Save settings");
   save.type = "submit";
   const cancel = button("Cancel", "secondary");
   cancel.addEventListener("click", () => { editor.hidden = true; });
 
-  editor.append(thresholdLabel, actionLabel, autoLabel, pollingEditor(credential));
+  editor.append(
+    thresholdLabel,
+    actionLabel,
+    autoLabel,
+    notificationsLabel,
+    pollingEditor(credential),
+  );
   const actionsRow = document.createElement("div");
   actionsRow.className = "controls";
   actionsRow.append(save, cancel);
@@ -268,6 +281,7 @@ function editForm(credential) {
       await patchCredential(credential.id, {
         threshold: data.get("threshold") === "" ? null : Number(data.get("threshold")),
         auto_protect: data.get("auto_protect") === "on",
+        notifications_muted: data.get("notifications_muted") === "on",
         protection_action: data.get("protection_action"),
         polling,
       }, "Credential settings saved and an immediate check was scheduled.");
@@ -340,6 +354,7 @@ function card(credential) {
     metric("Last check", when(schedule.last_check_at || usage?.checked_at)),
     metric("Next check", credential.paused ? "Paused" : when(schedule.next_check_at)),
     metric("Auto Protect", credential.auto_protect ? "On" : "Off"),
+    metric("Notifications", credential.notifications_muted ? "Muted" : "Active"),
     metric("Provider action", (credential.protection_action || "notify_only").replaceAll("_", " ")),
   );
   article.append(metrics);
@@ -364,6 +379,12 @@ function card(credential) {
     {auto_protect: !credential.auto_protect},
     `Auto Protect turned ${credential.auto_protect ? "off" : "on"}.`,
   ).catch(() => {}));
+  const mute = button(credential.notifications_muted ? "Unmute alerts" : "Mute alerts", "secondary");
+  mute.addEventListener("click", () => patchCredential(
+    credential.id,
+    {notifications_muted: !credential.notifications_muted},
+    "Alerts " + (credential.notifications_muted ? "unmuted" : "muted") + " for " + credential.name + ".",
+  ).catch(() => {}));
   const protect = button("Protect now", "danger");
   protect.disabled = !(credential.available_actions || []).includes(credential.protection_action);
   protect.addEventListener("click", () => runAction(credential.id, "protect"));
@@ -372,7 +393,7 @@ function card(credential) {
   edit.addEventListener("click", () => { editor.hidden = !editor.hidden; });
   const remove = button("Remove", "ghost-danger");
   remove.addEventListener("click", () => removeCredential(credential.id));
-  controls.append(check, pause, toggle, protect, edit, remove);
+  controls.append(check, pause, toggle, mute, protect, edit, remove);
   article.append(controls, editor, historyPanel(credential));
   return article;
 }
@@ -415,6 +436,7 @@ form.addEventListener("submit", async (event) => {
     api_key: data.get("api_key"),
     threshold: threshold === "" ? null : Number(threshold),
     auto_protect: data.get("auto_protect") === "on",
+    notifications_muted: data.get("notifications_muted") === "on",
     protection_action: data.get("protection_action"),
   };
   const keyHash = data.get("key_hash").trim();

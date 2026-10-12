@@ -48,6 +48,7 @@ class Store:
                     masked_identifier TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'watching',
                     auto_protect INTEGER NOT NULL DEFAULT 0,
+                    notifications_muted INTEGER NOT NULL DEFAULT 0,
                     threshold REAL,
                     provider_metadata_json TEXT NOT NULL DEFAULT '{}',
                     protection_action TEXT NOT NULL DEFAULT 'notify_only',
@@ -65,6 +66,11 @@ class Store:
             if "provider_metadata_json" not in columns:
                 self._db.execute(
                     "ALTER TABLE credentials ADD COLUMN provider_metadata_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "notifications_muted" not in columns:
+                self._db.execute(
+                    "ALTER TABLE credentials ADD COLUMN "
+                    "notifications_muted INTEGER NOT NULL DEFAULT 0"
                 )
             if "protection_action" not in columns:
                 self._db.execute(
@@ -203,6 +209,7 @@ class Store:
             "masked_identifier": row["masked_identifier"],
             "status": row["status"],
             "auto_protect": bool(row["auto_protect"]),
+            "notifications_muted": bool(row["notifications_muted"]),
             "threshold": row["threshold"],
             "provider_metadata": json.loads(row["provider_metadata_json"]),
             "protection_action": row["protection_action"],
@@ -234,6 +241,7 @@ class Store:
         secret: str,
         threshold: float | None,
         auto_protect: bool,
+        notifications_muted: bool = False,
         provider_metadata: dict[str, Any] | None = None,
         protection_action: str = "notify_only",
         polling_config: dict[str, Any] | None = None,
@@ -247,10 +255,10 @@ class Store:
                     """
                     INSERT INTO credentials
                     (id, provider, name, masked_identifier, status, auto_protect,
-                     threshold, provider_metadata_json, protection_action,
+                     notifications_muted, threshold, provider_metadata_json, protection_action,
                      polling_config_json,
                      created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         credential_id,
@@ -258,6 +266,7 @@ class Store:
                         name,
                         masked,
                         int(auto_protect),
+                        int(notifications_muted),
                         threshold,
                         json.dumps(provider_metadata or {}, separators=(",", ":")),
                         protection_action,
@@ -332,7 +341,8 @@ class Store:
                         """
                         UPDATE credentials
                         SET provider = ?, name = ?, masked_identifier = ?, threshold = ?,
-                            auto_protect = ?, provider_metadata_json = ?,
+                            auto_protect = ?, notifications_muted = ?,
+                            provider_metadata_json = ?,
                             protection_action = ?, polling_config_json = ?,
                             updated_at = ?
                         WHERE id = ?
@@ -345,6 +355,12 @@ class Store:
                             ),
                             values.get("threshold", current["threshold"]),
                             int(values.get("auto_protect", current["auto_protect"])),
+                            int(
+                                values.get(
+                                    "notifications_muted",
+                                    current["notifications_muted"],
+                                )
+                            ),
                             json.dumps(
                                 values.get(
                                     "provider_metadata", current["provider_metadata"]
