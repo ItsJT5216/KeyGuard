@@ -9,7 +9,7 @@ The current implementation includes the [X-5 foundation](https://linear.app/itst
 - SQLite storage for non-secret credential configuration, usage snapshots, scheduler state, and event history;
 - a daemon-served HTML dashboard backed by real usage, scheduler, provider, and event state;
 - dashboard controls for on-demand checks, threshold and polling edits, pause/resume,
-  auto-protection, manual protection, history, and removal;
+  auto-protection, manual protection, billing-period expiration, history, and removal;
 - persisted distance- and burn-rate-driven polling with bounded jitter;
 - ntfy alerts for tier transitions, repeated provider failures, externally disabled credentials, and verified protection results, with per-credential muting;
 - a user-service installer and desktop launcher.

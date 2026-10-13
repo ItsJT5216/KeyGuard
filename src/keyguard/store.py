@@ -103,6 +103,8 @@ class Store:
                     configured_limit REAL,
                     remaining REAL,
                     unit TEXT,
+                    period_start TEXT,
+                    period_end TEXT,
                     success INTEGER NOT NULL,
                     error_code TEXT,
                     provider_status_json TEXT NOT NULL DEFAULT '{}',
@@ -132,6 +134,14 @@ class Store:
                 self._db.execute(
                     "ALTER TABLE usage_snapshots ADD COLUMN "
                     "provider_status_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "period_start" not in snapshot_columns:
+                self._db.execute(
+                    "ALTER TABLE usage_snapshots ADD COLUMN period_start TEXT"
+                )
+            if "period_end" not in snapshot_columns:
+                self._db.execute(
+                    "ALTER TABLE usage_snapshots ADD COLUMN period_end TEXT"
                 )
             self._db.execute(
                 """
@@ -430,8 +440,9 @@ class Store:
                 """
                 INSERT INTO usage_snapshots
                     (credential_id, checked_at, used, configured_limit, remaining,
-                     unit, success, error_code, provider_status_json)
-                VALUES (?, ?, ?, ?, ?, ?, 1, NULL, ?)
+                     unit, period_start, period_end, success, error_code,
+                     provider_status_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?)
                 """,
                 (
                     credential_id,
@@ -440,6 +451,8 @@ class Store:
                     snapshot.get("limit"),
                     snapshot.get("remaining"),
                     snapshot["unit"],
+                    snapshot.get("period_start"),
+                    snapshot.get("period_end"),
                     json.dumps(
                         snapshot.get("provider_status", {}), separators=(",", ":")
                     ),
@@ -450,8 +463,9 @@ class Store:
         with self._lock:
             rows = self._db.execute(
                 """
-                SELECT checked_at, used, configured_limit, remaining, unit, success,
-                       error_code, provider_status_json
+                SELECT checked_at, used, configured_limit, remaining, unit,
+                       period_start, period_end, success, error_code,
+                       provider_status_json
                 FROM usage_snapshots WHERE credential_id = ? ORDER BY id DESC
                 """,
                 (credential_id,),
@@ -468,8 +482,9 @@ class Store:
         with self._lock:
             usage_rows = self._db.execute(
                 """
-                SELECT checked_at, used, configured_limit, remaining, unit, success,
-                       error_code, provider_status_json
+                SELECT checked_at, used, configured_limit, remaining, unit,
+                       period_start, period_end, success, error_code,
+                       provider_status_json
                 FROM usage_snapshots
                 WHERE credential_id = ?
                 ORDER BY id DESC
@@ -521,6 +536,8 @@ class Store:
                 "limit": limit,
                 "remaining": latest.get("remaining"),
                 "unit": latest.get("unit"),
+                "period_start": latest.get("period_start"),
+                "period_end": latest.get("period_end"),
                 "percent_consumed": percent_consumed,
                 "provider_status": latest.get("provider_status", {}),
             }

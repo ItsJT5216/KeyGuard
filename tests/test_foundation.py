@@ -117,6 +117,23 @@ class FoundationTests(unittest.TestCase):
         self.assertIsNotNone(reopened)
         self.assertFalse(reopened["notifications_muted"])
 
+    def test_existing_snapshot_table_adds_billing_period_columns(self) -> None:
+        self.store.close()
+        with sqlite3.connect(self.path) as database:
+            database.execute("ALTER TABLE usage_snapshots DROP COLUMN period_start")
+            database.execute("ALTER TABLE usage_snapshots DROP COLUMN period_end")
+
+        self.store = Store(self.path, self.vault)
+
+        columns = {
+            row[1]
+            for row in self.store._db.execute(
+                "PRAGMA table_info(usage_snapshots)"
+            ).fetchall()
+        }
+        self.assertIn("period_start", columns)
+        self.assertIn("period_end", columns)
+
     def test_parameterized_values_do_not_escape_sql(self) -> None:
         created = self.store.create_credential(
             provider="x'); DROP TABLE credentials; --",
@@ -375,6 +392,8 @@ class FoundationTests(unittest.TestCase):
             ).fetchall()
         }
         self.assertIn("provider_status_json", snapshot_columns)
+        self.assertIn("period_start", snapshot_columns)
+        self.assertIn("period_end", snapshot_columns)
         indexes = {
             row[0]
             for row in self.store._db.execute(
@@ -403,6 +422,8 @@ class FoundationTests(unittest.TestCase):
                 "limit": 20,
                 "remaining": 18,
                 "unit": "USD",
+                "period_start": "2026-10-01T00:00:00+00:00",
+                "period_end": "2026-11-01T00:00:00+00:00",
                 "provider_status": {"limit_reset": "2026-11-01T00:00:00+00:00"},
             },
         )
@@ -414,6 +435,8 @@ class FoundationTests(unittest.TestCase):
                 "limit": 20,
                 "remaining": 14,
                 "unit": "USD",
+                "period_start": "2026-10-01T00:00:00+00:00",
+                "period_end": "2026-11-01T00:00:00+00:00",
                 "provider_status": {"limit_reset": "2026-11-01T00:00:00+00:00"},
             },
         )
@@ -429,6 +452,11 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(6, state["usage"]["used"])
         self.assertEqual(14, state["usage"]["remaining"])
         self.assertEqual(30, state["usage"]["percent_consumed"])
+        self.assertEqual("2026-10-01T00:00:00+00:00", state["usage"]["period_start"])
+        self.assertEqual("2026-11-01T00:00:00+00:00", state["usage"]["period_end"])
+        history = self.store.usage_history(credential_id)
+        self.assertEqual("2026-10-01T00:00:00+00:00", history[0]["period_start"])
+        self.assertEqual("2026-11-01T00:00:00+00:00", history[0]["period_end"])
         self.assertEqual(
             "2026-11-01T00:00:00+00:00",
             state["usage"]["provider_status"]["limit_reset"],
@@ -582,7 +610,9 @@ class FoundationTests(unittest.TestCase):
         self.assertIn('credential.notifications_muted ? "Muted" : "Active"', script)
         self.assertIn("{notifications_muted: !credential.notifications_muted}", script)
         self.assertIn('method: "PATCH"', script)
-        self.assertIn("limit_reset", script)
+        self.assertIn("credential.usage?.period_end", script)
+        self.assertIn('metric("Credits expire", daysUntil(usage?.period_end))', script)
+        self.assertIn('return "Expired"', script)
 
     def test_api_rejects_non_finite_and_giant_thresholds(self) -> None:
         token = "test-token-that-is-long-enough-123456"

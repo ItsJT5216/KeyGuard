@@ -5,7 +5,7 @@ import math
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from .base import (
@@ -97,6 +97,34 @@ def _number(
     return number
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _billing_period(
+    data: dict[str, Any], field: str
+) -> tuple[str | None, str | None, str | None]:
+    value = data.get(field)
+    if value is None:
+        return None, None, None
+    if not isinstance(value, str) or value not in {"daily", "weekly", "monthly"}:
+        raise ProviderError(f"OpenRouter response contains invalid {field}")
+
+    start = _utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
+    if value == "daily":
+        end = start + timedelta(days=1)
+    elif value == "weekly":
+        start -= timedelta(days=start.weekday())
+        end = start + timedelta(days=7)
+    else:
+        start = start.replace(day=1)
+        if start.month == 12:
+            end = start.replace(year=start.year + 1, month=1)
+        else:
+            end = start.replace(month=start.month + 1)
+    return start.isoformat(), end.isoformat(), value
+
+
 class OpenRouterAdapter:
     provider_id = "openrouter"
     capabilities = frozenset(
@@ -141,6 +169,9 @@ class OpenRouterAdapter:
         used = _number(data, "usage")
         limit = _number(data, "limit", optional=True)
         remaining = _number(data, "limit_remaining", optional=True)
+        period_start, period_end, limit_reset = _billing_period(
+            data, "limit_reset"
+        )
         if remaining is None and limit is not None:
             remaining = max(limit - used, 0.0)
         return UsageSnapshot(
@@ -149,9 +180,11 @@ class OpenRouterAdapter:
             limit=limit,
             remaining=remaining,
             unit="USD",
+            period_start=period_start,
+            period_end=period_end,
             provider_status={
                 "disabled": bool(data.get("disabled", False)),
-                "limit_reset": data.get("limit_reset"),
+                "limit_reset": limit_reset,
                 "scope": "individual_key",
             },
         )
