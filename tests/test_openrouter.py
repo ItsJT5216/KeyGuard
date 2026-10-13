@@ -99,7 +99,11 @@ class BlockingTransport(RecordedTransport):
 
 
 def key_payload(
-    *, usage: float, disabled: bool = False, limit: float = 20.0
+    *,
+    usage: float,
+    disabled: bool = False,
+    limit: float = 20.0,
+    limit_reset: str | None = None,
 ) -> dict[str, Any]:
     return {
         "data": {
@@ -107,7 +111,7 @@ def key_payload(
             "usage": usage,
             "limit": limit,
             "limit_remaining": max(limit - usage, 0),
-            "limit_reset": None,
+            "limit_reset": limit_reset,
             "disabled": disabled,
         }
     }
@@ -173,7 +177,9 @@ class OpenRouterAdapterTests(unittest.TestCase):
         self.assertEqual([], redirected_requests)
 
     def test_parses_individual_key_usage_without_losing_scope(self) -> None:
-        transport = RecordedTransport([key_payload(usage=6.25)])
+        transport = RecordedTransport(
+            [key_payload(usage=6.25, limit_reset="2026-11-01T00:00:00+00:00")]
+        )
         adapter = OpenRouterAdapter(transport)
 
         snapshot = adapter.fetch_usage("management-secret", {"key_hash": "A" * 64})
@@ -182,6 +188,7 @@ class OpenRouterAdapterTests(unittest.TestCase):
         self.assertEqual(20.0, snapshot.limit)
         self.assertEqual(13.75, snapshot.remaining)
         self.assertEqual("USD", snapshot.unit)
+        self.assertEqual("2026-11-01T00:00:00+00:00", snapshot.period_end)
         self.assertEqual("individual_key", snapshot.provider_status["scope"])
         self.assertEqual(
             ("GET", f"/keys/{'a' * 64}", "management-secret", None),
@@ -194,6 +201,14 @@ class OpenRouterAdapterTests(unittest.TestCase):
                 adapter = OpenRouterAdapter(RecordedTransport([payload]))
                 with self.assertRaisesRegex(ProviderError, "usage"):
                     adapter.fetch_usage("management-secret", {"key_hash": "a" * 64})
+
+    def test_malformed_billing_period_is_rejected(self) -> None:
+        adapter = OpenRouterAdapter(
+            RecordedTransport([key_payload(usage=1, limit_reset="not-a-date")])
+        )
+
+        with self.assertRaisesRegex(ProviderError, "limit_reset"):
+            adapter.fetch_usage("management-secret", {"key_hash": "a" * 64})
 
     def test_capabilities_and_actions_match_the_documented_api(self) -> None:
         adapter = OpenRouterAdapter(RecordedTransport([]))

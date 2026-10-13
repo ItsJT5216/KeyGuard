@@ -23,6 +23,8 @@ class UsageSnapshot:
     remaining: float | None
     unit: str
     provider_status: dict[str, Any]
+    period_start: str | None = None
+    period_end: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -31,6 +33,8 @@ class UsageSnapshot:
             "limit": self.limit,
             "remaining": self.remaining,
             "unit": self.unit,
+            "period_start": self.period_start,
+            "period_end": self.period_end,
             "provider_status": self.provider_status,
         }
 

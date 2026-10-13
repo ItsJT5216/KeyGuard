@@ -97,6 +97,21 @@ def _number(
     return number
 
 
+def _timestamp(data: dict[str, Any], field: str) -> str | None:
+    value = data.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ProviderError(f"OpenRouter response contains invalid {field}")
+    try:
+        datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ProviderError(
+            f"OpenRouter response contains invalid {field}"
+        ) from error
+    return value
+
+
 class OpenRouterAdapter:
     provider_id = "openrouter"
     capabilities = frozenset(
@@ -141,6 +156,7 @@ class OpenRouterAdapter:
         used = _number(data, "usage")
         limit = _number(data, "limit", optional=True)
         remaining = _number(data, "limit_remaining", optional=True)
+        period_end = _timestamp(data, "limit_reset")
         if remaining is None and limit is not None:
             remaining = max(limit - used, 0.0)
         return UsageSnapshot(
@@ -149,9 +165,10 @@ class OpenRouterAdapter:
             limit=limit,
             remaining=remaining,
             unit="USD",
+            period_end=period_end,
             provider_status={
                 "disabled": bool(data.get("disabled", False)),
-                "limit_reset": data.get("limit_reset"),
+                "limit_reset": period_end,
                 "scope": "individual_key",
             },
         )
