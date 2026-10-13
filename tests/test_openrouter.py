@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -177,9 +178,7 @@ class OpenRouterAdapterTests(unittest.TestCase):
         self.assertEqual([], redirected_requests)
 
     def test_parses_individual_key_usage_without_losing_scope(self) -> None:
-        transport = RecordedTransport(
-            [key_payload(usage=6.25, limit_reset="2026-11-01T00:00:00+00:00")]
-        )
+        transport = RecordedTransport([key_payload(usage=6.25)])
         adapter = OpenRouterAdapter(transport)
 
         snapshot = adapter.fetch_usage("management-secret", {"key_hash": "A" * 64})
@@ -188,8 +187,10 @@ class OpenRouterAdapterTests(unittest.TestCase):
         self.assertEqual(20.0, snapshot.limit)
         self.assertEqual(13.75, snapshot.remaining)
         self.assertEqual("USD", snapshot.unit)
-        self.assertEqual("2026-11-01T00:00:00+00:00", snapshot.period_end)
+        self.assertIsNone(snapshot.period_start)
+        self.assertIsNone(snapshot.period_end)
         self.assertEqual("individual_key", snapshot.provider_status["scope"])
+        self.assertIsNone(snapshot.provider_status["limit_reset"])
         self.assertEqual(
             ("GET", f"/keys/{'a' * 64}", "management-secret", None),
             transport.calls[0],
@@ -209,6 +210,72 @@ class OpenRouterAdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ProviderError, "limit_reset"):
             adapter.fetch_usage("management-secret", {"key_hash": "a" * 64})
+
+    def test_monthly_reset_cadence_becomes_current_utc_billing_period(self) -> None:
+        adapter = OpenRouterAdapter(
+            RecordedTransport([key_payload(usage=1, limit_reset="monthly")])
+        )
+
+        with patch.object(
+            openrouter_module,
+            "_utc_now",
+            return_value=datetime(2026, 10, 13, 6, 30, tzinfo=UTC),
+        ):
+            snapshot = adapter.fetch_usage(
+                "management-secret", {"key_hash": "a" * 64}
+            )
+
+        self.assertEqual("2026-10-01T00:00:00+00:00", snapshot.period_start)
+        self.assertEqual("2026-11-01T00:00:00+00:00", snapshot.period_end)
+        self.assertEqual("monthly", snapshot.provider_status["limit_reset"])
+
+    def test_daily_and_weekly_reset_cadences_use_utc_boundaries(self) -> None:
+        cases = (
+            (
+                "daily",
+                "2026-10-13T00:00:00+00:00",
+                "2026-10-14T00:00:00+00:00",
+            ),
+            (
+                "weekly",
+                "2026-10-12T00:00:00+00:00",
+                "2026-10-19T00:00:00+00:00",
+            ),
+        )
+        for cadence, expected_start, expected_end in cases:
+            with self.subTest(cadence=cadence):
+                adapter = OpenRouterAdapter(
+                    RecordedTransport(
+                        [key_payload(usage=1, limit_reset=cadence)]
+                    )
+                )
+                with patch.object(
+                    openrouter_module,
+                    "_utc_now",
+                    return_value=datetime(2026, 10, 13, 23, 59, tzinfo=UTC),
+                ):
+                    snapshot = adapter.fetch_usage(
+                        "management-secret", {"key_hash": "a" * 64}
+                    )
+                self.assertEqual(expected_start, snapshot.period_start)
+                self.assertEqual(expected_end, snapshot.period_end)
+
+    def test_monthly_reset_rolls_december_into_next_year(self) -> None:
+        adapter = OpenRouterAdapter(
+            RecordedTransport([key_payload(usage=1, limit_reset="monthly")])
+        )
+
+        with patch.object(
+            openrouter_module,
+            "_utc_now",
+            return_value=datetime(2026, 12, 31, 23, 59, tzinfo=UTC),
+        ):
+            snapshot = adapter.fetch_usage(
+                "management-secret", {"key_hash": "a" * 64}
+            )
+
+        self.assertEqual("2026-12-01T00:00:00+00:00", snapshot.period_start)
+        self.assertEqual("2027-01-01T00:00:00+00:00", snapshot.period_end)
 
     def test_capabilities_and_actions_match_the_documented_api(self) -> None:
         adapter = OpenRouterAdapter(RecordedTransport([]))
