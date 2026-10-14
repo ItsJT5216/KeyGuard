@@ -105,6 +105,7 @@ class Store:
                     unit TEXT,
                     period_start TEXT,
                     period_end TEXT,
+                    expires_at TEXT,
                     success INTEGER NOT NULL,
                     error_code TEXT,
                     provider_status_json TEXT NOT NULL DEFAULT '{}',
@@ -142,6 +143,10 @@ class Store:
             if "period_end" not in snapshot_columns:
                 self._db.execute(
                     "ALTER TABLE usage_snapshots ADD COLUMN period_end TEXT"
+                )
+            if "expires_at" not in snapshot_columns:
+                self._db.execute(
+                    "ALTER TABLE usage_snapshots ADD COLUMN expires_at TEXT"
                 )
             self._db.execute(
                 """
@@ -440,9 +445,9 @@ class Store:
                 """
                 INSERT INTO usage_snapshots
                     (credential_id, checked_at, used, configured_limit, remaining,
-                     unit, period_start, period_end, success, error_code,
+                     unit, period_start, period_end, expires_at, success, error_code,
                      provider_status_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?)
                 """,
                 (
                     credential_id,
@@ -453,6 +458,7 @@ class Store:
                     snapshot["unit"],
                     snapshot.get("period_start"),
                     snapshot.get("period_end"),
+                    snapshot.get("expires_at"),
                     json.dumps(
                         snapshot.get("provider_status", {}), separators=(",", ":")
                     ),
@@ -464,7 +470,7 @@ class Store:
             rows = self._db.execute(
                 """
                 SELECT checked_at, used, configured_limit, remaining, unit,
-                       period_start, period_end, success, error_code,
+                       period_start, period_end, expires_at, success, error_code,
                        provider_status_json
                 FROM usage_snapshots WHERE credential_id = ? ORDER BY id DESC
                 """,
@@ -483,7 +489,7 @@ class Store:
             usage_rows = self._db.execute(
                 """
                 SELECT checked_at, used, configured_limit, remaining, unit,
-                       period_start, period_end, success, error_code,
+                       period_start, period_end, expires_at, success, error_code,
                        provider_status_json
                 FROM usage_snapshots
                 WHERE credential_id = ?
@@ -538,6 +544,7 @@ class Store:
                 "unit": latest.get("unit"),
                 "period_start": latest.get("period_start"),
                 "period_end": latest.get("period_end"),
+                "expires_at": latest.get("expires_at"),
                 "percent_consumed": percent_consumed,
                 "provider_status": latest.get("provider_status", {}),
             }

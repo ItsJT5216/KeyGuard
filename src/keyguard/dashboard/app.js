@@ -70,17 +70,17 @@ function metric(label, value) {
 }
 
 function expiryTime(credential) {
-  const raw = credential.usage?.period_end;
+  const raw = credential.usage?.expires_at;
   const parsed = raw ? Date.parse(raw) : Number.NaN;
   return Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed;
 }
 
-function daysUntil(value) {
+function daysUntil(value, elapsed = "Expired") {
   if (!value) return "Not available";
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) return "Not available";
   const milliseconds = parsed - Date.now();
-  if (milliseconds <= 0) return "Expired";
+  if (milliseconds <= 0) return elapsed;
   const days = Math.ceil(milliseconds / 86_400_000);
   return `${days} day${days === 1 ? "" : "s"} left`;
 }
@@ -355,7 +355,8 @@ function card(credential) {
     metric("Used", number(usage?.used, usage?.unit)),
     metric("Remaining", number(usage?.remaining, usage?.unit)),
     metric("Allocation", number(usage?.limit, usage?.unit)),
-    metric("Credits expire", daysUntil(usage?.period_end)),
+    metric("Credits expire", daysUntil(usage?.expires_at)),
+    metric("Limit resets", daysUntil(usage?.period_end, "Reset due")),
     metric("Kill threshold", number(credential.threshold, usage?.unit)),
     metric("Burn rate", credential.burn_rate_per_second !== null
         && credential.burn_rate_per_second !== undefined
