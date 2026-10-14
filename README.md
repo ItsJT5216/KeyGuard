@@ -11,6 +11,8 @@ The current implementation includes the [X-5 foundation](https://linear.app/itst
 - dashboard controls for on-demand checks, threshold and polling edits, pause/resume,
   auto-protection, manual protection, billing-period resets, credential expiration,
   history, and removal;
+- optional authorized starting allowances that are reconciled with authoritative
+  provider-reported remaining credit before create or increase;
 - persisted distance- and burn-rate-driven polling with bounded jitter;
 - ntfy alerts for tier transitions, repeated provider failures, externally disabled credentials, and verified protection results, with per-credential muting;
 - a user-service installer and desktop launcher.

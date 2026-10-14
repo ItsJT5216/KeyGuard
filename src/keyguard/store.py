@@ -50,6 +50,7 @@ class Store:
                     auto_protect INTEGER NOT NULL DEFAULT 0,
                     notifications_muted INTEGER NOT NULL DEFAULT 0,
                     threshold REAL,
+                    starting_allowance REAL,
                     provider_metadata_json TEXT NOT NULL DEFAULT '{}',
                     protection_action TEXT NOT NULL DEFAULT 'notify_only',
                     polling_config_json TEXT NOT NULL DEFAULT '{}',
@@ -71,6 +72,10 @@ class Store:
                 self._db.execute(
                     "ALTER TABLE credentials ADD COLUMN "
                     "notifications_muted INTEGER NOT NULL DEFAULT 0"
+                )
+            if "starting_allowance" not in columns:
+                self._db.execute(
+                    "ALTER TABLE credentials ADD COLUMN starting_allowance REAL"
                 )
             if "protection_action" not in columns:
                 self._db.execute(
@@ -226,6 +231,7 @@ class Store:
             "auto_protect": bool(row["auto_protect"]),
             "notifications_muted": bool(row["notifications_muted"]),
             "threshold": row["threshold"],
+            "starting_allowance": row["starting_allowance"],
             "provider_metadata": json.loads(row["provider_metadata_json"]),
             "protection_action": row["protection_action"],
             "polling_config": json.loads(row["polling_config_json"]),
@@ -256,6 +262,7 @@ class Store:
         secret: str,
         threshold: float | None,
         auto_protect: bool,
+        starting_allowance: float | None = None,
         notifications_muted: bool = False,
         provider_metadata: dict[str, Any] | None = None,
         protection_action: str = "notify_only",
@@ -270,10 +277,10 @@ class Store:
                     """
                     INSERT INTO credentials
                     (id, provider, name, masked_identifier, status, auto_protect,
-                     notifications_muted, threshold, provider_metadata_json, protection_action,
-                     polling_config_json,
+                     notifications_muted, threshold, starting_allowance,
+                     provider_metadata_json, protection_action, polling_config_json,
                      created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         credential_id,
@@ -283,6 +290,7 @@ class Store:
                         int(auto_protect),
                         int(notifications_muted),
                         threshold,
+                        starting_allowance,
                         json.dumps(provider_metadata or {}, separators=(",", ":")),
                         protection_action,
                         json.dumps(polling_config or {}, separators=(",", ":")),
@@ -356,8 +364,8 @@ class Store:
                         """
                         UPDATE credentials
                         SET provider = ?, name = ?, masked_identifier = ?, threshold = ?,
-                            auto_protect = ?, notifications_muted = ?,
-                            provider_metadata_json = ?,
+                            starting_allowance = ?, auto_protect = ?,
+                            notifications_muted = ?, provider_metadata_json = ?,
                             protection_action = ?, polling_config_json = ?,
                             updated_at = ?
                         WHERE id = ?
@@ -369,6 +377,9 @@ class Store:
                                 "masked_identifier", current["masked_identifier"]
                             ),
                             values.get("threshold", current["threshold"]),
+                            values.get(
+                                "starting_allowance", current["starting_allowance"]
+                            ),
                             int(values.get("auto_protect", current["auto_protect"])),
                             int(
                                 values.get(
@@ -774,9 +785,7 @@ class Store:
         config["auth_configured"] = auth_token is not None
         return config
 
-    def update_notification_config(
-        self, values: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_notification_config(self, values: dict[str, Any]) -> dict[str, Any]:
         secret_id = "__notification_ntfy_auth__"
         with self._lock:
             row = self._db.execute(
@@ -822,4 +831,3 @@ class Store:
                         self.vault.set(secret_id, previous_token)
                 raise
         return self.get_notification_config()
-
