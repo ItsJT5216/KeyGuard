@@ -221,8 +221,13 @@ class OpenRouterAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "limit_reset"):
             adapter.fetch_usage("management-secret", {"key_hash": "a" * 64})
 
-    def test_malformed_or_timezone_free_expiration_is_rejected(self) -> None:
-        for value in ("not-a-date", "2027-12-31T23:59:59"):
+    def test_invalid_or_out_of_range_expiration_is_rejected(self) -> None:
+        for value in (
+            "not-a-date",
+            "2027-12-31T23:59:59",
+            "0001-01-01T00:00:00+14:00",
+            "9999-12-31T23:59:59-14:00",
+        ):
             with self.subTest(expires_at=value):
                 adapter = OpenRouterAdapter(
                     RecordedTransport(

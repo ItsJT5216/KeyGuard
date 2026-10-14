@@ -133,13 +133,13 @@ def _timestamp(data: dict[str, Any], field: str) -> str | None:
         raise ProviderError(f"OpenRouter response contains invalid {field}")
     try:
         parsed = datetime.fromisoformat(value)
-    except ValueError as error:
+        if parsed.tzinfo is None:
+            raise ValueError("timestamp is missing a UTC offset")
+        return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    except (ValueError, OverflowError) as error:
         raise ProviderError(
             f"OpenRouter response contains invalid {field}"
         ) from error
-    if parsed.tzinfo is None:
-        raise ProviderError(f"OpenRouter response contains invalid {field}")
-    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 class OpenRouterAdapter:
