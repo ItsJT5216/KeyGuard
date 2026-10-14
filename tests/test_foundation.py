@@ -117,11 +117,12 @@ class FoundationTests(unittest.TestCase):
         self.assertIsNotNone(reopened)
         self.assertFalse(reopened["notifications_muted"])
 
-    def test_existing_snapshot_table_adds_billing_period_columns(self) -> None:
+    def test_existing_snapshot_table_adds_period_and_expiration_columns(self) -> None:
         self.store.close()
         with sqlite3.connect(self.path) as database:
             database.execute("ALTER TABLE usage_snapshots DROP COLUMN period_start")
             database.execute("ALTER TABLE usage_snapshots DROP COLUMN period_end")
+            database.execute("ALTER TABLE usage_snapshots DROP COLUMN expires_at")
 
         self.store = Store(self.path, self.vault)
 
@@ -133,6 +134,7 @@ class FoundationTests(unittest.TestCase):
         }
         self.assertIn("period_start", columns)
         self.assertIn("period_end", columns)
+        self.assertIn("expires_at", columns)
 
     def test_parameterized_values_do_not_escape_sql(self) -> None:
         created = self.store.create_credential(
@@ -394,6 +396,7 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("provider_status_json", snapshot_columns)
         self.assertIn("period_start", snapshot_columns)
         self.assertIn("period_end", snapshot_columns)
+        self.assertIn("expires_at", snapshot_columns)
         indexes = {
             row[0]
             for row in self.store._db.execute(
@@ -424,6 +427,7 @@ class FoundationTests(unittest.TestCase):
                 "unit": "USD",
                 "period_start": "2026-10-01T00:00:00+00:00",
                 "period_end": "2026-11-01T00:00:00+00:00",
+                "expires_at": "2027-12-31T23:59:59Z",
                 "provider_status": {"limit_reset": "2026-11-01T00:00:00+00:00"},
             },
         )
@@ -437,6 +441,7 @@ class FoundationTests(unittest.TestCase):
                 "unit": "USD",
                 "period_start": "2026-10-01T00:00:00+00:00",
                 "period_end": "2026-11-01T00:00:00+00:00",
+                "expires_at": "2027-12-31T23:59:59Z",
                 "provider_status": {"limit_reset": "2026-11-01T00:00:00+00:00"},
             },
         )
@@ -454,9 +459,11 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(30, state["usage"]["percent_consumed"])
         self.assertEqual("2026-10-01T00:00:00+00:00", state["usage"]["period_start"])
         self.assertEqual("2026-11-01T00:00:00+00:00", state["usage"]["period_end"])
+        self.assertEqual("2027-12-31T23:59:59Z", state["usage"]["expires_at"])
         history = self.store.usage_history(credential_id)
         self.assertEqual("2026-10-01T00:00:00+00:00", history[0]["period_start"])
         self.assertEqual("2026-11-01T00:00:00+00:00", history[0]["period_end"])
+        self.assertEqual("2027-12-31T23:59:59Z", history[0]["expires_at"])
         self.assertEqual(
             "2026-11-01T00:00:00+00:00",
             state["usage"]["provider_status"]["limit_reset"],
@@ -610,9 +617,14 @@ class FoundationTests(unittest.TestCase):
         self.assertIn('credential.notifications_muted ? "Muted" : "Active"', script)
         self.assertIn("{notifications_muted: !credential.notifications_muted}", script)
         self.assertIn('method: "PATCH"', script)
-        self.assertIn("credential.usage?.period_end", script)
-        self.assertIn('metric("Credits expire", daysUntil(usage?.period_end))', script)
-        self.assertIn('return "Expired"', script)
+        self.assertIn("credential.usage?.expires_at", script)
+        self.assertIn('metric("Credits expire", daysUntil(usage?.expires_at))', script)
+        self.assertIn(
+            'metric("Limit resets", daysUntil(usage?.period_end, "Reset due"))',
+            script,
+        )
+        self.assertIn('function daysUntil(value, elapsed = "Expired")', script)
+        self.assertIn("return elapsed", script)
 
     def test_api_rejects_non_finite_and_giant_thresholds(self) -> None:
         token = "test-token-that-is-long-enough-123456"

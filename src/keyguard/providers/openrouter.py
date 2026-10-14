@@ -125,6 +125,23 @@ def _billing_period(
     return start.isoformat(), end.isoformat(), value
 
 
+def _timestamp(data: dict[str, Any], field: str) -> str | None:
+    value = data.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ProviderError(f"OpenRouter response contains invalid {field}")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ProviderError(
+            f"OpenRouter response contains invalid {field}"
+        ) from error
+    if parsed.tzinfo is None:
+        raise ProviderError(f"OpenRouter response contains invalid {field}")
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
 class OpenRouterAdapter:
     provider_id = "openrouter"
     capabilities = frozenset(
@@ -172,6 +189,7 @@ class OpenRouterAdapter:
         period_start, period_end, limit_reset = _billing_period(
             data, "limit_reset"
         )
+        expires_at = _timestamp(data, "expires_at")
         if remaining is None and limit is not None:
             remaining = max(limit - used, 0.0)
         return UsageSnapshot(
@@ -182,6 +200,7 @@ class OpenRouterAdapter:
             unit="USD",
             period_start=period_start,
             period_end=period_end,
+            expires_at=expires_at,
             provider_status={
                 "disabled": bool(data.get("disabled", False)),
                 "limit_reset": limit_reset,

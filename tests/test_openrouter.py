@@ -105,6 +105,7 @@ def key_payload(
     disabled: bool = False,
     limit: float = 20.0,
     limit_reset: str | None = None,
+    expires_at: str | None = None,
 ) -> dict[str, Any]:
     return {
         "data": {
@@ -113,6 +114,7 @@ def key_payload(
             "limit": limit,
             "limit_remaining": max(limit - usage, 0),
             "limit_reset": limit_reset,
+            "expires_at": expires_at,
             "disabled": disabled,
         }
     }
@@ -178,7 +180,14 @@ class OpenRouterAdapterTests(unittest.TestCase):
         self.assertEqual([], redirected_requests)
 
     def test_parses_individual_key_usage_without_losing_scope(self) -> None:
-        transport = RecordedTransport([key_payload(usage=6.25)])
+        transport = RecordedTransport(
+            [
+                key_payload(
+                    usage=6.25,
+                    expires_at="2027-12-31T23:59:59Z",
+                )
+            ]
+        )
         adapter = OpenRouterAdapter(transport)
 
         snapshot = adapter.fetch_usage("management-secret", {"key_hash": "A" * 64})
@@ -189,6 +198,7 @@ class OpenRouterAdapterTests(unittest.TestCase):
         self.assertEqual("USD", snapshot.unit)
         self.assertIsNone(snapshot.period_start)
         self.assertIsNone(snapshot.period_end)
+        self.assertEqual("2027-12-31T23:59:59Z", snapshot.expires_at)
         self.assertEqual("individual_key", snapshot.provider_status["scope"])
         self.assertIsNone(snapshot.provider_status["limit_reset"])
         self.assertEqual(
@@ -210,6 +220,19 @@ class OpenRouterAdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ProviderError, "limit_reset"):
             adapter.fetch_usage("management-secret", {"key_hash": "a" * 64})
+
+    def test_malformed_or_timezone_free_expiration_is_rejected(self) -> None:
+        for value in ("not-a-date", "2027-12-31T23:59:59"):
+            with self.subTest(expires_at=value):
+                adapter = OpenRouterAdapter(
+                    RecordedTransport(
+                        [key_payload(usage=1, expires_at=value)]
+                    )
+                )
+                with self.assertRaisesRegex(ProviderError, "expires_at"):
+                    adapter.fetch_usage(
+                        "management-secret", {"key_hash": "a" * 64}
+                    )
 
     def test_monthly_reset_cadence_becomes_current_utc_billing_period(self) -> None:
         adapter = OpenRouterAdapter(

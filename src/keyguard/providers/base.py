@@ -25,6 +25,7 @@ class UsageSnapshot:
     provider_status: dict[str, Any]
     period_start: str | None = None
     period_end: str | None = None
+    expires_at: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -35,6 +36,7 @@ class UsageSnapshot:
             "unit": self.unit,
             "period_start": self.period_start,
             "period_end": self.period_end,
+            "expires_at": self.expires_at,
             "provider_status": self.provider_status,
         }
 
