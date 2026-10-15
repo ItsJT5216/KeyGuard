@@ -20,7 +20,7 @@ from .notifications import (
 )
 from .protection import ProtectionService
 from .providers import ProviderRegistry
-from .providers.base import ProviderError
+from .providers.base import CAN_FETCH_BALANCE, BalanceSnapshot, ProviderError
 from .scheduler import (
     AdaptiveScheduler,
     PollingConfigError,
@@ -181,17 +181,26 @@ def make_handler(
         secret: str,
         metadata: dict[str, Any],
         allowance: float,
-    ) -> None:
-        snapshot = providers.get(provider).fetch_usage(secret, metadata)
-        if snapshot.remaining is None:
+    ) -> BalanceSnapshot:
+        adapter = providers.get(provider)
+        if CAN_FETCH_BALANCE not in adapter.capabilities:
             raise ApiError(
                 422,
                 "ALLOWANCE_UNVERIFIED",
-                "Provider did not report authoritative remaining credit; "
+                "Provider does not expose authoritative available credit; "
                 "the allowance was not saved",
             )
-        if allowance > snapshot.remaining:
-            raise AllowanceShortfall(allowance, snapshot.remaining, snapshot.unit)
+        balance = adapter.fetch_balance(secret, metadata)
+        if balance.available is None:
+            raise ApiError(
+                422,
+                "ALLOWANCE_UNVERIFIED",
+                "Provider did not report authoritative available credit; "
+                "the allowance was not saved",
+            )
+        if allowance > balance.available:
+            raise AllowanceShortfall(allowance, balance.available, balance.unit)
+        return balance
 
     def notify_allowance_shortfall(
         *,
@@ -200,8 +209,6 @@ def make_handler(
         notifications_muted: bool,
         shortfall: AllowanceShortfall,
     ) -> None:
-        if notifications_muted:
-            return
         message = (
             f"KeyGuard rejected {name}'s allowance: requested "
             f"{shortfall.requested:g} {shortfall.unit}, but the provider reports "
@@ -209,7 +216,10 @@ def make_handler(
         )
         try:
             if credential is None:
-                if store.get_notification_config()["enabled"]:
+                if (
+                    not notifications_muted
+                    and store.get_notification_config()["enabled"]
+                ):
                     notifications.send(
                         message,
                         priority="urgent",
@@ -491,11 +501,22 @@ def make_handler(
                     starting_allowance = _starting_allowance(
                         body.get("starting_allowance")
                     )
+                    threshold = _threshold(body.get("threshold"))
+                    auto_protect = _boolean(
+                        body.get("auto_protect"), "auto_protect"
+                    )
+                    polling_config = normalize_polling_config(body.get("polling"))
+                    starting_allowance_unit = None
                     if starting_allowance is not None:
                         try:
-                            reconcile_allowance(
+                            balance = reconcile_allowance(
                                 provider, secret, metadata, starting_allowance
                             )
+                            starting_allowance_unit = balance.unit
+                        except ProviderError as error:
+                            raise ApiError(
+                                502, "PROVIDER_ERROR", str(error)
+                            ) from error
                         except AllowanceShortfall as error:
                             notify_allowance_shortfall(
                                 credential=None,
@@ -512,13 +533,14 @@ def make_handler(
                         provider=provider,
                         name=name,
                         secret=secret,
-                        threshold=_threshold(body.get("threshold")),
-                        auto_protect=_boolean(body.get("auto_protect"), "auto_protect"),
+                        threshold=threshold,
+                        auto_protect=auto_protect,
                         starting_allowance=starting_allowance,
+                        starting_allowance_unit=starting_allowance_unit,
                         notifications_muted=notifications_muted,
                         provider_metadata=metadata,
                         protection_action=action,
-                        polling_config=normalize_polling_config(body.get("polling")),
+                        polling_config=polling_config,
                     )
                     scheduler.schedule_now(credential["id"])
                     self._json(
@@ -632,6 +654,8 @@ def make_handler(
                     values["starting_allowance"] = _starting_allowance(
                         body["starting_allowance"]
                     )
+                    if values["starting_allowance"] is None:
+                        values["starting_allowance_unit"] = None
                 if "auto_protect" in body:
                     values["auto_protect"] = _boolean(
                         body["auto_protect"], "auto_protect"
@@ -679,32 +703,38 @@ def make_handler(
                         current_allowance is None
                         or proposed_allowance > current_allowance
                     )
-                    if allowance_increased:
+                    identity_changed = any(
+                        field in values
+                        and values[field] != current[current_field]
+                        for field, current_field in (
+                            ("provider", "provider"),
+                            ("provider_metadata", "provider_metadata"),
+                        )
+                    ) or "api_key" in values
+                    if proposed_allowance is not None and (
+                        allowance_increased or identity_changed
+                    ):
                         secret = values.get("api_key") or store.get_secret(
                             credential_id
                         )
                         if secret is None:
-                            raise ProviderError("Credential secret is unavailable")
+                            raise ApiError(
+                                502,
+                                "PROVIDER_ERROR",
+                                "Credential secret is unavailable",
+                            )
                         try:
-                            reconcile_allowance(
+                            balance = reconcile_allowance(
                                 provider, secret, metadata, proposed_allowance
                             )
+                            values["starting_allowance_unit"] = balance.unit
                         except ProviderError as error:
                             raise ApiError(502, "PROVIDER_ERROR", str(error)) from error
                         except AllowanceShortfall as error:
                             notify_allowance_shortfall(
-                                credential={
-                                    **current,
-                                    "notifications_muted": values.get(
-                                        "notifications_muted",
-                                        current["notifications_muted"],
-                                    ),
-                                },
-                                name=values.get("name", current["name"]),
-                                notifications_muted=values.get(
-                                    "notifications_muted",
-                                    current["notifications_muted"],
-                                ),
+                                credential=current,
+                                name=current["name"],
+                                notifications_muted=current["notifications_muted"],
                                 shortfall=error,
                             )
                             raise ApiError(

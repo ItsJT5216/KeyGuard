@@ -51,6 +51,7 @@ class Store:
                     notifications_muted INTEGER NOT NULL DEFAULT 0,
                     threshold REAL,
                     starting_allowance REAL,
+                    starting_allowance_unit TEXT,
                     provider_metadata_json TEXT NOT NULL DEFAULT '{}',
                     protection_action TEXT NOT NULL DEFAULT 'notify_only',
                     polling_config_json TEXT NOT NULL DEFAULT '{}',
@@ -76,6 +77,10 @@ class Store:
             if "starting_allowance" not in columns:
                 self._db.execute(
                     "ALTER TABLE credentials ADD COLUMN starting_allowance REAL"
+                )
+            if "starting_allowance_unit" not in columns:
+                self._db.execute(
+                    "ALTER TABLE credentials ADD COLUMN starting_allowance_unit TEXT"
                 )
             if "protection_action" not in columns:
                 self._db.execute(
@@ -232,6 +237,7 @@ class Store:
             "notifications_muted": bool(row["notifications_muted"]),
             "threshold": row["threshold"],
             "starting_allowance": row["starting_allowance"],
+            "starting_allowance_unit": row["starting_allowance_unit"],
             "provider_metadata": json.loads(row["provider_metadata_json"]),
             "protection_action": row["protection_action"],
             "polling_config": json.loads(row["polling_config_json"]),
@@ -263,6 +269,7 @@ class Store:
         threshold: float | None,
         auto_protect: bool,
         starting_allowance: float | None = None,
+        starting_allowance_unit: str | None = None,
         notifications_muted: bool = False,
         provider_metadata: dict[str, Any] | None = None,
         protection_action: str = "notify_only",
@@ -278,9 +285,10 @@ class Store:
                     INSERT INTO credentials
                     (id, provider, name, masked_identifier, status, auto_protect,
                      notifications_muted, threshold, starting_allowance,
+                     starting_allowance_unit,
                      provider_metadata_json, protection_action, polling_config_json,
                      created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         credential_id,
@@ -291,6 +299,7 @@ class Store:
                         int(notifications_muted),
                         threshold,
                         starting_allowance,
+                        starting_allowance_unit,
                         json.dumps(provider_metadata or {}, separators=(",", ":")),
                         protection_action,
                         json.dumps(polling_config or {}, separators=(",", ":")),
@@ -364,7 +373,8 @@ class Store:
                         """
                         UPDATE credentials
                         SET provider = ?, name = ?, masked_identifier = ?, threshold = ?,
-                            starting_allowance = ?, auto_protect = ?,
+                            starting_allowance = ?, starting_allowance_unit = ?,
+                            auto_protect = ?,
                             notifications_muted = ?, provider_metadata_json = ?,
                             protection_action = ?, polling_config_json = ?,
                             updated_at = ?
@@ -379,6 +389,10 @@ class Store:
                             values.get("threshold", current["threshold"]),
                             values.get(
                                 "starting_allowance", current["starting_allowance"]
+                            ),
+                            values.get(
+                                "starting_allowance_unit",
+                                current["starting_allowance_unit"],
                             ),
                             int(values.get("auto_protect", current["auto_protect"])),
                             int(

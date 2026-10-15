@@ -7,7 +7,6 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -15,7 +14,7 @@ from keyguard.api import create_server
 from keyguard.auth import mint_bootstrap
 from keyguard.notifications import NotificationError
 from keyguard.providers import ProviderRegistry
-from keyguard.providers.base import ProviderError, UsageSnapshot
+from keyguard.providers.base import BalanceSnapshot, ProviderError
 from keyguard.store import Store
 
 OWNER_TOKEN = "test-token-that-is-long-enough-123456"
@@ -41,25 +40,21 @@ class AllowanceAdapter:
     actions: tuple[str, ...] = ()
 
     def __init__(self) -> None:
-        self.remaining: float | None = 20.0
+        self.available: float | None = 20.0
+        self.unit = "USD"
         self.error: ProviderError | None = None
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     def validate_metadata(self, metadata: dict[str, object]) -> dict[str, object]:
         return dict(metadata)
 
-    def fetch_usage(self, secret: str, metadata: dict[str, object]) -> UsageSnapshot:
+    def fetch_balance(
+        self, secret: str, metadata: dict[str, object]
+    ) -> BalanceSnapshot:
         self.calls.append((secret, dict(metadata)))
         if self.error is not None:
             raise self.error
-        return UsageSnapshot(
-            checked_at=datetime.now(UTC).isoformat(),
-            used=5.0,
-            limit=25.0,
-            remaining=self.remaining,
-            unit="USD",
-            provider_status={},
-        )
+        return BalanceSnapshot(available=self.available, unit=self.unit)
 
     def execute_action(
         self, action: str, secret: str, metadata: dict[str, object]
@@ -138,11 +133,13 @@ class AllowanceTests(unittest.TestCase):
         self.assertEqual(201, status)
         credential = payload["credential"]
         self.assertEqual(20.0, credential["starting_allowance"])
+        self.assertEqual("USD", credential["starting_allowance_unit"])
         self.assertEqual(
             [("management-secret", {"scope": "one-key"})], self.adapter.calls
         )
         persisted = self.store.get_credential(credential["id"])
         self.assertEqual(20.0, persisted["starting_allowance"])
+        self.assertEqual("USD", persisted["starting_allowance_unit"])
 
         self.adapter.calls.clear()
         status, payload = self.request(
@@ -176,7 +173,7 @@ class AllowanceTests(unittest.TestCase):
         )
 
     def test_missing_remaining_credit_rejects_without_assuming_zero(self) -> None:
-        self.adapter.remaining = None
+        self.adapter.available = None
 
         status, payload = self.request(
             "POST",
@@ -187,8 +184,22 @@ class AllowanceTests(unittest.TestCase):
         self.assertEqual(422, status)
         self.assertEqual("ALLOWANCE_UNVERIFIED", payload["error"]["code"])
         self.assertIn(
-            "did not report authoritative remaining credit", payload["error"]["message"]
+            "did not report authoritative available credit", payload["error"]["message"]
         )
+        self.assertEqual([], self.store.list_credentials())
+
+    def test_create_validates_complete_payload_before_provider_call(self) -> None:
+        self.adapter.available = 0
+
+        status, payload = self.request(
+            "POST",
+            "/api/credentials",
+            self.create_payload(starting_allowance=1, polling="not-an-object"),
+        )
+
+        self.assertEqual(422, status)
+        self.assertEqual("POLLING_CONFIGURATION_ERROR", payload["error"]["code"])
+        self.assertEqual([], self.adapter.calls)
         self.assertEqual([], self.store.list_credentials())
 
     def test_provider_error_rejects_allowance_without_saving(self) -> None:
@@ -239,6 +250,120 @@ class AllowanceTests(unittest.TestCase):
         )
         self.assertEqual("rejected", event["result"])
 
+    def test_identity_change_revalidates_unchanged_allowance_atomically(self) -> None:
+        created = self.store.create_credential(
+            provider=self.adapter.provider_id,
+            name="Existing",
+            secret="old-secret",
+            threshold=None,
+            auto_protect=False,
+            starting_allowance=5,
+            starting_allowance_unit="USD",
+            provider_metadata={"scope": "one-key"},
+        )
+        self.adapter.available = 4
+
+        status, payload = self.request(
+            "PATCH",
+            f"/api/credentials/{created['id']}",
+            {
+                "api_key": "replacement-secret",
+                "metadata": {"scope": "another-key"},
+            },
+        )
+
+        self.assertEqual(422, status)
+        self.assertEqual("ALLOWANCE_EXCEEDS_AVAILABLE_CREDIT", payload["error"]["code"])
+        current = self.store.get_credential(created["id"])
+        self.assertEqual({"scope": "one-key"}, current["provider_metadata"])
+        self.assertEqual("old-secret", self.vault.secrets[created["id"]])
+        self.assertEqual(
+            ("replacement-secret", {"scope": "another-key"}),
+            self.adapter.calls[-1],
+        )
+
+    def test_failed_patch_uses_persisted_mute_state_and_records_history(self) -> None:
+        created = self.store.create_credential(
+            provider=self.adapter.provider_id,
+            name="Existing",
+            secret="secret",
+            threshold=None,
+            auto_protect=False,
+            starting_allowance=5,
+            starting_allowance_unit="USD",
+            notifications_muted=False,
+        )
+        self.store.update_notification_config({"enabled": True})
+        self.server.notifications.send = Mock()
+
+        status, _ = self.request(
+            "PATCH",
+            f"/api/credentials/{created['id']}",
+            {"starting_allowance": 30, "notifications_muted": True},
+        )
+
+        self.assertEqual(422, status)
+        self.server.notifications.send.assert_called_once()
+        current = self.store.get_credential(created["id"])
+        self.assertFalse(current["notifications_muted"])
+        self.assertEqual(
+            "rejected",
+            next(
+                event
+                for event in self.store.history(created["id"])
+                if event["event_type"] == "allowance_validation"
+            )["result"],
+        )
+
+    def test_muted_rejection_still_records_source_event(self) -> None:
+        created = self.store.create_credential(
+            provider=self.adapter.provider_id,
+            name="Muted",
+            secret="secret",
+            threshold=None,
+            auto_protect=False,
+            starting_allowance=5,
+            starting_allowance_unit="USD",
+            notifications_muted=True,
+        )
+        self.store.update_notification_config({"enabled": True})
+        self.server.notifications.send = Mock()
+
+        status, _ = self.request(
+            "PATCH",
+            f"/api/credentials/{created['id']}",
+            {"starting_allowance": 30, "notifications_muted": False},
+        )
+
+        self.assertEqual(422, status)
+        self.server.notifications.send.assert_not_called()
+        events = self.store.history(created["id"])
+        self.assertTrue(
+            any(event["event_type"] == "allowance_validation" for event in events)
+        )
+
+    def test_missing_stored_secret_maps_to_provider_error(self) -> None:
+        created = self.store.create_credential(
+            provider=self.adapter.provider_id,
+            name="Missing secret",
+            secret="secret",
+            threshold=None,
+            auto_protect=False,
+            starting_allowance=5,
+            starting_allowance_unit="USD",
+        )
+        self.vault.delete(created["id"])
+
+        status, payload = self.request(
+            "PATCH",
+            f"/api/credentials/{created['id']}",
+            {"starting_allowance": 6},
+        )
+
+        self.assertEqual(502, status)
+        self.assertEqual("PROVIDER_ERROR", payload["error"]["code"])
+        self.assertEqual(5.0, self.store.get_credential(created["id"])["starting_allowance"])
+
     def test_notification_failure_does_not_hide_allowance_rejection(self) -> None:
         self.store.update_notification_config({"enabled": True})
         self.server.notifications.send = Mock(
@@ -263,6 +388,9 @@ class AllowanceTests(unittest.TestCase):
         database = sqlite3.connect(self.path)
         try:
             database.execute("ALTER TABLE credentials DROP COLUMN starting_allowance")
+            database.execute(
+                "ALTER TABLE credentials DROP COLUMN starting_allowance_unit"
+            )
             database.commit()
         finally:
             database.close()
@@ -274,6 +402,7 @@ class AllowanceTests(unittest.TestCase):
             ).fetchall()
         }
         self.assertIn("starting_allowance", columns)
+        self.assertIn("starting_allowance_unit", columns)
         created = self.store.create_credential(
             provider=self.adapter.provider_id,
             name="Persisted",
@@ -281,12 +410,17 @@ class AllowanceTests(unittest.TestCase):
             threshold=None,
             auto_protect=False,
             starting_allowance=7.5,
+            starting_allowance_unit="USD",
         )
         self.store.close()
         self.store = Store(self.path, self.vault)
         self.assertEqual(
             7.5,
             self.store.get_credential(created["id"])["starting_allowance"],
+        )
+        self.assertEqual(
+            "USD",
+            self.store.get_credential(created["id"])["starting_allowance_unit"],
         )
         self.server = create_server(
             self.store,
@@ -308,7 +442,7 @@ class AllowanceTests(unittest.TestCase):
         self.assertIn('name="starting_allowance"', html)
         self.assertIn('allowance.name = "starting_allowance"', script)
         self.assertIn(
-            'metric("Authorized allowance", number(credential.starting_allowance',
+            'number(credential.starting_allowance, credential.starting_allowance_unit)',
             script,
         )
         self.assertIn("starting_allowance: startingAllowance", script)

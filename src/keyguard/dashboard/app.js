@@ -370,7 +370,10 @@ function card(credential) {
     metric("Allocation", number(usage?.limit, usage?.unit)),
     metric("Credits expire", daysUntil(usage?.expires_at)),
     metric("Limit resets", daysUntil(usage?.period_end, "Reset due")),
-    metric("Authorized allowance", number(credential.starting_allowance, usage?.unit)),
+    metric(
+      "Authorized allowance",
+      number(credential.starting_allowance, credential.starting_allowance_unit),
+    ),
     metric("Kill threshold", number(credential.threshold, usage?.unit)),
     metric("Burn rate", credential.burn_rate_per_second !== null
         && credential.burn_rate_per_second !== undefined
