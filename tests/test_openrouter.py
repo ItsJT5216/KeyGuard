@@ -14,6 +14,7 @@ from keyguard.providers import ProviderRegistry
 from keyguard.providers import openrouter as openrouter_module
 from keyguard.providers.base import (
     CAN_DISABLE_KEY,
+    CAN_FETCH_BALANCE,
     CAN_FETCH_USAGE,
     CAN_IDENTIFY_INDIVIDUAL_KEY_USAGE,
     ProviderError,
@@ -121,6 +122,33 @@ def key_payload(
 
 
 class OpenRouterAdapterTests(unittest.TestCase):
+    def test_fetches_authoritative_account_credit_balance(self) -> None:
+        transport = RecordedTransport(
+            [{"data": {"total_credits": 100.5, "total_usage": 25.75}}]
+        )
+        adapter = OpenRouterAdapter(transport)
+
+        balance = adapter.fetch_balance(
+            "management-secret", {"key_hash": "a" * 64}
+        )
+
+        self.assertIn(CAN_FETCH_BALANCE, adapter.capabilities)
+        self.assertEqual(74.75, balance.available)
+        self.assertEqual("USD", balance.unit)
+        self.assertEqual(
+            [("GET", "/credits", "management-secret", None)], transport.calls
+        )
+
+    def test_malformed_credit_balance_is_rejected(self) -> None:
+        for payload in (
+            {"data": {}},
+            {"data": {"total_credits": 10, "total_usage": "unknown"}},
+        ):
+            with self.subTest(payload=payload):
+                adapter = OpenRouterAdapter(RecordedTransport([payload]))
+                with self.assertRaises(ProviderError):
+                    adapter.fetch_balance("management-secret", {})
+
     def test_transport_rejects_redirect_without_forwarding_authorization(self) -> None:
         redirected_requests: list[str | None] = []
         initial_authorization: list[str | None] = []

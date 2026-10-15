@@ -16,6 +16,12 @@ class ProviderError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class BalanceSnapshot:
+    available: float | None
+    unit: str
+
+
+@dataclass(frozen=True)
 class UsageSnapshot:
     checked_at: str
     used: float
@@ -50,6 +56,11 @@ class ProviderAdapter(Protocol):
         pass
 
     def fetch_usage(self, secret: str, metadata: dict[str, Any]) -> UsageSnapshot:
+        pass
+
+    def fetch_balance(
+        self, secret: str, metadata: dict[str, Any]
+    ) -> BalanceSnapshot:
         pass
 
     def execute_action(

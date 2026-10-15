@@ -11,6 +11,8 @@ The current implementation includes the [X-5 foundation](https://linear.app/itst
 - dashboard controls for on-demand checks, threshold and polling edits, pause/resume,
   auto-protection, manual protection, billing-period resets, credential expiration,
   history, and removal;
+- optional authorized starting allowances that are reconciled with authoritative
+  provider-reported account credit before create, increase, or identity change;
 - persisted distance- and burn-rate-driven polling with bounded jitter;
 - ntfy alerts for tier transitions, repeated provider failures, externally disabled credentials, and verified protection results, with per-credential muting;
 - a user-service installer and desktop launcher.
@@ -97,6 +99,8 @@ Polling tier, current interval, next check, last check, and consecutive failures
 KeyGuard's first verified adapter uses OpenRouter's documented management-key API. Add the management key as the provider credential and the target API key's 64-character hash as provider metadata. A configured `disable` action performs the full X-7 protection flow: fetch usage, confirm a crossed threshold with a second fresh fetch, disable the key, fetch it again, and report success only when OpenRouter returns `disabled: true`.
 
 - Usage endpoint: `GET /api/v1/keys/{hash}`.
+- Account-credit endpoint: `GET /api/v1/credits`; allowance validation uses
+  `total_credits - total_usage`, not the selected key's configured spending cap.
 - Usage scope: the individual OpenRouter API key identified by the hash.
 - Credential: an OpenRouter Management API key with permission to read and update API keys.
 - Units: USD credits; `usage` is the selected key's recorded usage, while `limit`, `limit_remaining`, and `limit_reset` describe its configured cap and reset period.

@@ -223,6 +223,15 @@ function editForm(credential) {
   editor.className = "edit-form";
   editor.hidden = true;
 
+  const allowance = document.createElement("input");
+  allowance.name = "starting_allowance";
+  allowance.type = "number";
+  allowance.min = "0";
+  allowance.step = "any";
+  allowance.value = credential.starting_allowance ?? "";
+  const allowanceLabel = text("label", "Authorized starting allowance");
+  allowanceLabel.append(allowance);
+
   const threshold = document.createElement("input");
   threshold.name = "threshold";
   threshold.type = "number";
@@ -264,6 +273,7 @@ function editForm(credential) {
   cancel.addEventListener("click", () => { editor.hidden = true; });
 
   editor.append(
+    allowanceLabel,
     thresholdLabel,
     actionLabel,
     autoLabel,
@@ -289,6 +299,9 @@ function editForm(credential) {
     save.disabled = true;
     try {
       await patchCredential(credential.id, {
+        starting_allowance: data.get("starting_allowance") === ""
+          ? null
+          : Number(data.get("starting_allowance")),
         threshold: data.get("threshold") === "" ? null : Number(data.get("threshold")),
         auto_protect: data.get("auto_protect") === "on",
         notifications_muted: data.get("notifications_muted") === "on",
@@ -357,6 +370,10 @@ function card(credential) {
     metric("Allocation", number(usage?.limit, usage?.unit)),
     metric("Credits expire", daysUntil(usage?.expires_at)),
     metric("Limit resets", daysUntil(usage?.period_end, "Reset due")),
+    metric(
+      "Authorized allowance",
+      number(credential.starting_allowance, credential.starting_allowance_unit),
+    ),
     metric("Kill threshold", number(credential.threshold, usage?.unit)),
     metric("Burn rate", credential.burn_rate_per_second !== null
         && credential.burn_rate_per_second !== undefined
@@ -442,10 +459,12 @@ form.addEventListener("submit", async (event) => {
   formMessage.textContent = "Saving…";
   const data = new FormData(form);
   const threshold = data.get("threshold");
+  const startingAllowance = data.get("starting_allowance");
   const body = {
     provider: data.get("provider"),
     name: data.get("name"),
     api_key: data.get("api_key"),
+    starting_allowance: startingAllowance === "" ? null : Number(startingAllowance),
     threshold: threshold === "" ? null : Number(threshold),
     auto_protect: data.get("auto_protect") === "on",
     notifications_muted: data.get("notifications_muted") === "on",

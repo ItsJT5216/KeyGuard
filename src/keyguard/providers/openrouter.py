@@ -15,6 +15,7 @@ from .base import (
     CAN_FETCH_USAGE,
     CAN_IDENTIFY_INDIVIDUAL_KEY_USAGE,
     CAN_SET_LIMIT,
+    BalanceSnapshot,
     ProviderError,
     UsageSnapshot,
 )
@@ -206,6 +207,21 @@ class OpenRouterAdapter:
                 "limit_reset": limit_reset,
                 "scope": "individual_key",
             },
+        )
+
+    def fetch_balance(
+        self, secret: str, metadata: dict[str, Any]
+    ) -> BalanceSnapshot:
+        del metadata
+        payload = self.transport.request("GET", "/credits", secret)
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise ProviderError("OpenRouter returned a malformed credits response")
+        total_credits = _number(data, "total_credits")
+        total_usage = _number(data, "total_usage")
+        return BalanceSnapshot(
+            available=max(total_credits - total_usage, 0.0),
+            unit="USD",
         )
 
     def execute_action(
