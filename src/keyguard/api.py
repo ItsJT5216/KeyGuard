@@ -191,7 +191,15 @@ def make_handler(
                 "the allowance was not saved",
             )
         balance = adapter.fetch_balance(secret, metadata)
-        if balance.available is None:
+        if (
+            balance.available is None
+            or isinstance(balance.available, bool)
+            or not isinstance(balance.available, (int, float))
+            or not math.isfinite(balance.available)
+            or balance.available < 0
+            or not isinstance(balance.unit, str)
+            or not balance.unit.strip()
+        ):
             raise ApiError(
                 422,
                 "ALLOWANCE_UNVERIFIED",

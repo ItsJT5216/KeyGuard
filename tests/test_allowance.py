@@ -188,6 +188,21 @@ class AllowanceTests(unittest.TestCase):
         )
         self.assertEqual([], self.store.list_credentials())
 
+    def test_invalid_provider_balance_rejects_without_saving(self) -> None:
+        for available in (float("nan"), -1.0):
+            with self.subTest(available=available):
+                self.adapter.available = available
+
+                status, payload = self.request(
+                    "POST",
+                    "/api/credentials",
+                    self.create_payload(starting_allowance=0),
+                )
+
+                self.assertEqual(422, status)
+                self.assertEqual("ALLOWANCE_UNVERIFIED", payload["error"]["code"])
+                self.assertEqual([], self.store.list_credentials())
+
     def test_create_validates_complete_payload_before_provider_call(self) -> None:
         self.adapter.available = 0
 
