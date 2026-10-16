@@ -442,6 +442,10 @@ async function loadCredentials({quiet = false, background = false} = {}) {
     if (background && hasActiveInteraction()) return;
     const ordered = [...credentials].sort(sortCredentials);
     credentialCount.textContent = `${ordered.length} credential${ordered.length === 1 ? "" : "s"}`;
+    const activeElement = document.activeElement;
+    const focusedHistoryElement = activeElement?.closest("details.history")
+      ? activeElement
+      : null;
     const openHistoryByCredential = new Map(
       [...credentialList.querySelectorAll(".credential-card")]
         .map((article) => [
@@ -459,6 +463,9 @@ async function loadCredentials({quiet = false, background = false} = {}) {
     credentialList.replaceChildren(...(cards.length
       ? cards
       : [text("p", "No credentials are being watched yet.", "empty")]));
+    if (focusedHistoryElement?.isConnected) {
+      focusedHistoryElement.focus({preventScroll: true});
+    }
   } catch (error) {
     if (sequence !== loadSequence) return;
     credentialList.replaceChildren(text("p", error.message, "error"));
