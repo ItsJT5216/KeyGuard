@@ -428,7 +428,11 @@ function card(credential) {
 }
 
 function hasActiveInteraction() {
-  return credentialList.querySelector(".edit-form:not([hidden]), details[open]") !== null;
+  if (credentialList.querySelector(".edit-form:not([hidden])")) return true;
+  return [...credentialList.querySelectorAll("details[open]")].some((details) => {
+    const editor = details.closest(".edit-form");
+    return !editor || !editor.hidden;
+  });
 }
 
 async function loadCredentials({quiet = false, background = false} = {}) {
