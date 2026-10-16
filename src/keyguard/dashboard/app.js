@@ -348,6 +348,7 @@ function card(credential) {
   const display = displayStatus(credential);
   const article = document.createElement("article");
   article.className = `credential-card status-${display.slug}`;
+  article.dataset.credentialId = credential.id;
   const top = document.createElement("div");
   top.className = "card-heading";
   const identity = document.createElement("div");
@@ -428,11 +429,7 @@ function card(credential) {
 }
 
 function hasActiveInteraction() {
-  if (credentialList.querySelector(".edit-form:not([hidden])")) return true;
-  return [...credentialList.querySelectorAll("details[open]")].some((details) => {
-    const editor = details.closest(".edit-form");
-    return !editor || !editor.hidden;
-  });
+  return credentialList.querySelector(".edit-form:not([hidden])") !== null;
 }
 
 async function loadCredentials({quiet = false, background = false} = {}) {
@@ -445,9 +442,30 @@ async function loadCredentials({quiet = false, background = false} = {}) {
     if (background && hasActiveInteraction()) return;
     const ordered = [...credentials].sort(sortCredentials);
     credentialCount.textContent = `${ordered.length} credential${ordered.length === 1 ? "" : "s"}`;
-    credentialList.replaceChildren(...(ordered.length
-      ? ordered.map(card)
+    const activeElement = document.activeElement;
+    const focusedHistoryElement = activeElement?.closest("details.history")
+      ? activeElement
+      : null;
+    const openHistoryByCredential = new Map(
+      [...credentialList.querySelectorAll(".credential-card")]
+        .map((article) => [
+          article.dataset.credentialId,
+          article.querySelector(":scope > details.history[open]"),
+        ])
+        .filter(([, details]) => details),
+    );
+    const cards = ordered.map((credential) => {
+      const article = card(credential);
+      const openHistory = openHistoryByCredential.get(credential.id);
+      if (openHistory) article.querySelector(":scope > details.history").replaceWith(openHistory);
+      return article;
+    });
+    credentialList.replaceChildren(...(cards.length
+      ? cards
       : [text("p", "No credentials are being watched yet.", "empty")]));
+    if (focusedHistoryElement?.isConnected) {
+      focusedHistoryElement.focus({preventScroll: true});
+    }
   } catch (error) {
     if (sequence !== loadSequence) return;
     credentialList.replaceChildren(text("p", error.message, "error"));
