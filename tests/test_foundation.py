@@ -610,13 +610,12 @@ class FoundationTests(unittest.TestCase):
         )
         self.assertIn("const polling = {...(credential.polling_config || {})}", script)
         self.assertIn("background && hasActiveInteraction()", script)
-        self.assertIn('querySelector(".edit-form:not([hidden])")', script)
-        self.assertIn('querySelectorAll("details[open]")', script)
-        self.assertIn('details.closest(".edit-form")', script)
-        self.assertIn("return !editor || !editor.hidden", script)
-        self.assertNotIn(
-            'querySelector(".edit-form:not([hidden]), details[open]")', script
+        self.assertIn(
+            'querySelector(".edit-form:not([hidden])") !== null', script
         )
+        self.assertIn("article.dataset.credentialId = credential.id", script)
+        self.assertIn('article.querySelector(":scope > details.history[open]")', script)
+        self.assertIn("openHistoryByCredential.get(credential.id)", script)
         self.assertIn('tier === "error_retry"', script)
         self.assertIn("credential.status)", script)
         self.assertIn('"action_failed"', script)
