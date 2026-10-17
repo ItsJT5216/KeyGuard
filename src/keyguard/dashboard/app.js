@@ -8,6 +8,7 @@ const notificationMessage = document.querySelector("#notification-message");
 let sessionToken = window.sessionStorage.getItem("keyguardSession");
 let loadSequence = 0;
 let saving = false;
+let backgroundRefreshError = null;
 
 async function api(path, options = {}) {
   const headers = {...(options.headers || {})};
@@ -41,6 +42,19 @@ function button(label, className = "") {
 function showMessage(value, isError = false) {
   globalMessage.textContent = value;
   globalMessage.classList.toggle("error", isError);
+}
+
+function reportBackgroundRefreshError(error) {
+  const message = `Unable to refresh daemon state: ${error.message}`;
+  backgroundRefreshError = message;
+  showMessage(message, true);
+}
+
+function clearBackgroundRefreshError() {
+  if (backgroundRefreshError && globalMessage.textContent === backgroundRefreshError) {
+    showMessage("");
+  }
+  backgroundRefreshError = null;
 }
 
 function number(value, unit) {
@@ -466,8 +480,13 @@ async function loadCredentials({quiet = false, background = false} = {}) {
     if (focusedHistoryElement?.isConnected) {
       focusedHistoryElement.focus({preventScroll: true});
     }
+    clearBackgroundRefreshError();
   } catch (error) {
     if (sequence !== loadSequence) return;
+    if (background) {
+      reportBackgroundRefreshError(error);
+      return;
+    }
     credentialList.replaceChildren(text("p", error.message, "error"));
   }
 }
