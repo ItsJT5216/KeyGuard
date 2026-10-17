@@ -643,6 +643,26 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("let backgroundRefreshError = null", script)
         self.assertIn("Unable to refresh daemon state: ${error.message}", script)
         self.assertIn("reportBackgroundRefreshError(error)", script)
+        self.assertIn("error.status = response.status", script)
+        self.assertIn("let foregroundRefreshPending = false", script)
+        self.assertIn(
+            "background && (hasActiveInteraction() || foregroundRefreshPending)",
+            script,
+        )
+        self.assertIn(
+            """if (sequence !== loadSequence) return;
+    clearBackgroundRefreshError();
+    if (background && hasActiveInteraction()) return;""",
+            script,
+        )
+        self.assertIn("if (background && error.status !== 401)", script)
+        self.assertIn("if (error.status === 401) clearBackgroundRefreshError()", script)
+        self.assertIn(
+            """if (!background && sequence === loadSequence) {
+      foregroundRefreshPending = false;
+    }""",
+            script,
+        )
         self.assertIn(
             "globalMessage.textContent === backgroundRefreshError", script
         )
