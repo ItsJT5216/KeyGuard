@@ -635,6 +635,54 @@ class FoundationTests(unittest.TestCase):
         self.assertIn('function daysUntil(value, elapsed = "Expired")', script)
         self.assertIn("return elapsed", script)
 
+    def test_background_refresh_failure_preserves_last_known_dashboard_state(self) -> None:
+        script = (
+            Path(__file__).parents[1] / "src" / "keyguard" / "dashboard" / "app.js"
+        ).read_text()
+
+        self.assertIn("let backgroundRefreshError = null", script)
+        self.assertIn("Unable to refresh daemon state: ${error.message}", script)
+        self.assertIn("reportBackgroundRefreshError(error)", script)
+        self.assertIn("error.status = response.status", script)
+        self.assertIn("let foregroundRefreshPending = false", script)
+        self.assertIn(
+            "background && (hasActiveInteraction() || foregroundRefreshPending)",
+            script,
+        )
+        self.assertIn(
+            """if (sequence !== loadSequence) return;
+    clearBackgroundRefreshError();
+    if (background && hasActiveInteraction()) return;""",
+            script,
+        )
+        self.assertIn("if (background && error.status !== 401)", script)
+        self.assertIn("if (error.status === 401) clearBackgroundRefreshError()", script)
+        self.assertIn(
+            """if (!background && sequence === loadSequence) {
+      foregroundRefreshPending = false;
+    }""",
+            script,
+        )
+        self.assertIn(
+            "globalMessage.textContent === backgroundRefreshError", script
+        )
+        self.assertIn(
+            """if (focusedHistoryElement?.isConnected) {
+      focusedHistoryElement.focus({preventScroll: true});
+    }
+  } catch (error) {""",
+            script,
+        )
+        self.assertIn(
+            """if (background && error.status !== 401) {
+      reportBackgroundRefreshError(error);
+      return;
+    }
+    if (error.status === 401) clearBackgroundRefreshError();
+    credentialList.replaceChildren(text("p", error.message, "error"));""",
+            script,
+        )
+
     def test_api_rejects_non_finite_and_giant_thresholds(self) -> None:
         token = "test-token-that-is-long-enough-123456"
         server = create_server(self.store, token, 0)
