@@ -9,6 +9,7 @@ let sessionToken = window.sessionStorage.getItem("keyguardSession");
 let loadSequence = 0;
 let saving = false;
 let backgroundRefreshError = null;
+let foregroundRefreshPending = false;
 
 async function api(path, options = {}) {
   const headers = {...(options.headers || {})};
@@ -21,7 +22,9 @@ async function api(path, options = {}) {
       sessionToken = null;
       window.sessionStorage.removeItem("keyguardSession");
     }
-    throw new Error(payload?.error?.message || payload?.error?.code || "Request failed");
+    const error = new Error(payload?.error?.message || payload?.error?.code || "Request failed");
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
@@ -447,12 +450,14 @@ function hasActiveInteraction() {
 }
 
 async function loadCredentials({quiet = false, background = false} = {}) {
-  if (background && hasActiveInteraction()) return;
+  if (background && (hasActiveInteraction() || foregroundRefreshPending)) return;
   const sequence = ++loadSequence;
+  if (!background) foregroundRefreshPending = true;
   if (!quiet) credentialList.replaceChildren(text("p", "Loading daemon state…", "empty"));
   try {
     const {credentials} = await api("/api/credentials");
     if (sequence !== loadSequence) return;
+    clearBackgroundRefreshError();
     if (background && hasActiveInteraction()) return;
     const ordered = [...credentials].sort(sortCredentials);
     credentialCount.textContent = `${ordered.length} credential${ordered.length === 1 ? "" : "s"}`;
@@ -480,14 +485,18 @@ async function loadCredentials({quiet = false, background = false} = {}) {
     if (focusedHistoryElement?.isConnected) {
       focusedHistoryElement.focus({preventScroll: true});
     }
-    clearBackgroundRefreshError();
   } catch (error) {
     if (sequence !== loadSequence) return;
-    if (background) {
+    if (background && error.status !== 401) {
       reportBackgroundRefreshError(error);
       return;
     }
+    if (error.status === 401) clearBackgroundRefreshError();
     credentialList.replaceChildren(text("p", error.message, "error"));
+  } finally {
+    if (!background && sequence === loadSequence) {
+      foregroundRefreshPending = false;
+    }
   }
 }
 
