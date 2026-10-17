@@ -332,6 +332,53 @@ function editForm(credential) {
   return editor;
 }
 
+function usageSparkline(snapshots) {
+  const section = document.createElement("section");
+  section.className = "usage-trend";
+  section.append(text("h4", "Usage trend"));
+  const numeric = snapshots.filter((item) => (
+    Number.isFinite(item.used) && typeof item.unit === "string" && item.unit
+  ));
+  if (!numeric.length) {
+    section.append(text("p", "No usage history recorded yet.", "muted"));
+    return section;
+  }
+  const unit = numeric.at(-1).unit;
+  const series = numeric.filter((item) => item.unit === unit);
+  const values = series.map((item) => item.used);
+  const minimum = Math.min(...values);
+  const maximum = Math.max(...values);
+  const span = maximum - minimum || 1;
+  const width = 120;
+  const height = 36;
+  const x = (index) => series.length === 1 ? width / 2 : index * width / (series.length - 1);
+  const y = (value) => height - ((value - minimum) / span) * height;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("role", "img");
+  svg.setAttribute(
+    "aria-label",
+    `Usage trend across ${series.length} check${series.length === 1 ? "" : "s"}; latest ${number(values.at(-1), unit)}`,
+  );
+  if (series.length === 1) {
+    const point = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    point.setAttribute("cx", String(x(0)));
+    point.setAttribute("cy", String(y(values[0])));
+    point.setAttribute("r", "3");
+    svg.append(point);
+  } else {
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    line.setAttribute("points", values.map((value, index) => `${x(index)},${y(value)}`).join(" "));
+    svg.append(line);
+  }
+  section.append(
+    svg,
+    text("p", `${series.length} check${series.length === 1 ? "" : "s"} · latest ${number(values.at(-1), unit)}`, "muted"),
+  );
+  return section;
+}
+
 function historyPanel(credential) {
   const details = document.createElement("details");
   details.className = "history";
@@ -345,12 +392,17 @@ function historyPanel(credential) {
     loading = true;
     content.replaceChildren(text("p", "Loading event history…", "muted"));
     try {
-      const {events} = await api(`/api/credentials/${encodeURIComponent(credential.id)}/history?limit=12`);
+      const {events, usage = []} = await api(`/api/credentials/${encodeURIComponent(credential.id)}/history?limit=12`);
       const list = document.createElement("ol");
       for (const event of events) {
         list.append(text("li", `${when(event.created_at)} · ${event.event_type.replaceAll("_", " ")} · ${event.result}`));
       }
-      content.replaceChildren(events.length ? list : text("p", "No events recorded yet.", "muted"));
+      const eventsSection = document.createElement("section");
+      eventsSection.append(
+        text("h4", "Recent events"),
+        events.length ? list : text("p", "No events recorded yet.", "muted"),
+      );
+      content.replaceChildren(usageSparkline(usage), eventsSection);
       loaded = true;
     } catch (error) {
       content.replaceChildren(text("p", `${error.message} Close and reopen this panel to retry.`, "error"));

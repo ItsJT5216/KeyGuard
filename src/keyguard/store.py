@@ -490,22 +490,32 @@ class Store:
                 ),
             )
 
-    def usage_history(self, credential_id: str) -> list[dict[str, Any]]:
+    def usage_history(
+        self,
+        credential_id: str,
+        *,
+        limit: int | None = None,
+        chronological: bool = False,
+    ) -> list[dict[str, Any]]:
         with self._lock:
-            rows = self._db.execute(
-                """
+            statement = """
                 SELECT checked_at, used, configured_limit, remaining, unit,
                        period_start, period_end, expires_at, success, error_code,
                        provider_status_json
                 FROM usage_snapshots WHERE credential_id = ? ORDER BY id DESC
-                """,
-                (credential_id,),
-            ).fetchall()
+            """
+            parameters: list[Any] = [credential_id]
+            if limit is not None:
+                statement += " LIMIT ?"
+                parameters.append(limit)
+            rows = self._db.execute(statement, parameters).fetchall()
         history = []
         for row in rows:
             item = dict(row)
             item["provider_status"] = json.loads(item.pop("provider_status_json"))
             history.append(item)
+        if chronological:
+            history.reverse()
         return history
 
     def dashboard_state(self, credential_id: str) -> dict[str, Any]:
