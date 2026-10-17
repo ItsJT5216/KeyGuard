@@ -670,14 +670,15 @@ class FoundationTests(unittest.TestCase):
             """if (focusedHistoryElement?.isConnected) {
       focusedHistoryElement.focus({preventScroll: true});
     }
-    clearBackgroundRefreshError();""",
+  } catch (error) {""",
             script,
         )
         self.assertIn(
-            """if (background) {
+            """if (background && error.status !== 401) {
       reportBackgroundRefreshError(error);
       return;
     }
+    if (error.status === 401) clearBackgroundRefreshError();
     credentialList.replaceChildren(text("p", error.message, "error"));""",
             script,
         )
