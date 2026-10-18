@@ -442,8 +442,9 @@ def make_handler(
                     history = store.history(segments[2], limit=limit)
                     if history is None:
                         raise ApiError(404, "NOT_FOUND", "Credential not found")
+                    usage_limit = limit if limit is not None else 100
                     usage_history = store.usage_history(
-                        segments[2], limit=limit, chronological=True
+                        segments[2], limit=usage_limit, chronological=True
                     )
                     usage = [
                         {
