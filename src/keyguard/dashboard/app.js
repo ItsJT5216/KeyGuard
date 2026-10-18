@@ -336,9 +336,14 @@ function usageSparkline(snapshots) {
   const section = document.createElement("section");
   section.className = "usage-trend";
   section.append(text("h4", "Usage trend"));
-  const numeric = snapshots.filter((item) => (
-    Number.isFinite(item.used) && typeof item.unit === "string" && item.unit
-  ));
+  const numeric = snapshots
+    .map((item) => ({...item, timestamp: Date.parse(item.checked_at)}))
+    .filter((item) => (
+      Number.isFinite(item.used)
+      && Number.isFinite(item.timestamp)
+      && typeof item.unit === "string"
+      && item.unit
+    ));
   if (!numeric.length) {
     section.append(text("p", "No usage history recorded yet.", "muted"));
     return section;
@@ -346,12 +351,17 @@ function usageSparkline(snapshots) {
   const unit = numeric.at(-1).unit;
   const series = numeric.filter((item) => item.unit === unit);
   const values = series.map((item) => item.used);
+  const timestamps = series.map((item) => item.timestamp);
   const minimum = Math.min(...values);
   const maximum = Math.max(...values);
   const span = maximum - minimum || 1;
+  const firstTimestamp = Math.min(...timestamps);
+  const timestampSpan = Math.max(...timestamps) - firstTimestamp;
   const width = 120;
   const height = 36;
-  const x = (index) => series.length === 1 ? width / 2 : index * width / (series.length - 1);
+  const x = (timestamp) => timestampSpan === 0
+    ? width / 2
+    : ((timestamp - firstTimestamp) / timestampSpan) * width;
   const y = (value) => height - ((value - minimum) / span) * height;
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -363,13 +373,13 @@ function usageSparkline(snapshots) {
   );
   if (series.length === 1) {
     const point = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    point.setAttribute("cx", String(x(0)));
+    point.setAttribute("cx", String(x(timestamps[0])));
     point.setAttribute("cy", String(y(values[0])));
     point.setAttribute("r", "3");
     svg.append(point);
   } else {
     const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-    line.setAttribute("points", values.map((value, index) => `${x(index)},${y(value)}`).join(" "));
+    line.setAttribute("points", values.map((value, index) => `${x(timestamps[index])},${y(value)}`).join(" "));
     svg.append(line);
   }
   section.append(
@@ -387,10 +397,15 @@ function historyPanel(credential) {
   details.append(content);
   let loaded = false;
   let loading = false;
-  details.addEventListener("toggle", async () => {
-    if (!details.open || loaded || loading) return;
+  let refreshPending = false;
+  async function loadHistory({force = false} = {}) {
+    if (!details.open || (loaded && !force)) return;
+    if (loading) {
+      refreshPending = refreshPending || force;
+      return;
+    }
     loading = true;
-    content.replaceChildren(text("p", "Loading event history…", "muted"));
+    if (!loaded) content.replaceChildren(text("p", "Loading event history…", "muted"));
     try {
       const {events, usage = []} = await api(`/api/credentials/${encodeURIComponent(credential.id)}/history?limit=12`);
       const list = document.createElement("ol");
@@ -405,10 +420,22 @@ function historyPanel(credential) {
       content.replaceChildren(usageSparkline(usage), eventsSection);
       loaded = true;
     } catch (error) {
-      content.replaceChildren(text("p", `${error.message} Close and reopen this panel to retry.`, "error"));
+      if (loaded) {
+        showMessage(`Unable to refresh event history: ${error.message}`, true);
+      } else {
+        content.replaceChildren(text("p", `${error.message} Close and reopen this panel to retry.`, "error"));
+      }
     } finally {
       loading = false;
+      if (refreshPending) {
+        refreshPending = false;
+        void loadHistory({force: true});
+      }
     }
+  }
+  details.addEventListener("toggle", () => { void loadHistory(); });
+  details.addEventListener("keyguard:refresh-history", () => {
+    void loadHistory({force: true});
   });
   return details;
 }
@@ -525,15 +552,22 @@ async function loadCredentials({quiet = false, background = false} = {}) {
         ])
         .filter(([, details]) => details),
     );
+    const historiesToRefresh = [];
     const cards = ordered.map((credential) => {
       const article = card(credential);
       const openHistory = openHistoryByCredential.get(credential.id);
-      if (openHistory) article.querySelector(":scope > details.history").replaceWith(openHistory);
+      if (openHistory) {
+        article.querySelector(":scope > details.history").replaceWith(openHistory);
+        historiesToRefresh.push(openHistory);
+      }
       return article;
     });
     credentialList.replaceChildren(...(cards.length
       ? cards
       : [text("p", "No credentials are being watched yet.", "empty")]));
+    historiesToRefresh.forEach((details) => {
+      details.dispatchEvent(new Event("keyguard:refresh-history"));
+    });
     if (focusedHistoryElement?.isConnected) {
       focusedHistoryElement.focus({preventScroll: true});
     }
