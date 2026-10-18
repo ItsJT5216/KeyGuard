@@ -620,6 +620,11 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("const {events, usage = []}", script)
         self.assertIn('svg.setAttribute("role", "img")', script)
         self.assertIn("No usage history recorded yet.", script)
+        self.assertIn("timestamp: Date.parse(item.checked_at)", script)
+        self.assertIn("timestampSpan === 0", script)
+        self.assertIn('details.addEventListener("keyguard:refresh-history"', script)
+        self.assertIn('new Event("keyguard:refresh-history")', script)
+        self.assertIn("refreshPending = refreshPending || force", script)
         self.assertIn("const polling = {...(credential.polling_config || {})}", script)
         self.assertIn("background && hasActiveInteraction()", script)
         self.assertIn(
@@ -820,6 +825,35 @@ class FoundationTests(unittest.TestCase):
             self.assertEqual({"checked_at", "used", "unit"}, set(usage[0]))
             self.assertEqual(3, usage[0]["used"])
             self.assertEqual(14, usage[-1]["used"])
+
+            for index in range(15, 115):
+                self.store.record_usage_snapshot(
+                    created["id"],
+                    {
+                        "checked_at": (
+                            f"2026-10-{18 + (index - 15) // 60:02d}T11:"
+                            f"{index % 60:02d}:00+00:00"
+                        ),
+                        "used": index,
+                        "limit": 120,
+                        "remaining": 120 - index,
+                        "unit": "USD",
+                        "provider_status": {},
+                    },
+                )
+            unbounded_request = urllib.request.Request(
+                f"{base}/api/credentials/{created['id']}/history",
+                headers={"Authorization": f"KeyGuard-Session {session}"},
+            )
+            with urllib.request.urlopen(unbounded_request) as response:
+                unbounded_payload = json.loads(response.read())
+            self.assertEqual(
+                len(self.store.history(created["id"])),
+                len(unbounded_payload["events"]),
+            )
+            self.assertEqual(100, len(unbounded_payload["usage"]))
+            self.assertEqual(15, unbounded_payload["usage"][0]["used"])
+            self.assertEqual(114, unbounded_payload["usage"][-1]["used"])
 
             invalid_limit = urllib.request.Request(
                 f"{base}/api/credentials/{created['id']}/history?limit=0",
