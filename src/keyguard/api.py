@@ -442,7 +442,19 @@ def make_handler(
                     history = store.history(segments[2], limit=limit)
                     if history is None:
                         raise ApiError(404, "NOT_FOUND", "Credential not found")
-                    self._json(200, {"events": history})
+                    usage_limit = limit if limit is not None else 100
+                    usage_history = store.usage_history(
+                        segments[2], limit=usage_limit, chronological=True
+                    )
+                    usage = [
+                        {
+                            "checked_at": item["checked_at"],
+                            "used": item["used"],
+                            "unit": item["unit"],
+                        }
+                        for item in usage_history
+                    ]
+                    self._json(200, {"events": history, "usage": usage})
                 else:
                     raise ApiError(404, "NOT_FOUND", "Route not found")
             except ApiError as error:
