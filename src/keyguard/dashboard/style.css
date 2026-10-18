@@ -116,6 +116,11 @@ input, select {
   padding: 11px;
   font: inherit;
 }
+input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: auto;
+  padding: 0;
+}
 .edit-form {
   padding: 16px;
   border: 1px solid var(--line);
