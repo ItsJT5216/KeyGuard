@@ -515,7 +515,9 @@ class Store:
             item["provider_status"] = json.loads(item.pop("provider_status_json"))
             history.append(item)
         if chronological:
-            history.reverse()
+            history.sort(
+                key=lambda item: datetime.fromisoformat(item["checked_at"])
+            )
         return history
 
     def dashboard_state(self, credential_id: str) -> dict[str, Any]:
