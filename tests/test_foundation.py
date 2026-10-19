@@ -597,6 +597,45 @@ class FoundationTests(unittest.TestCase):
         )
         self.assertGreater(BOOTSTRAP_TTL_SECONDS, 0)
 
+    def test_usage_history_bounds_newest_rows_then_sorts_by_checked_at(self) -> None:
+        created = self.store.create_credential(
+            provider="Example",
+            name="Out of order",
+            secret="secret",
+            threshold=15,
+            auto_protect=False,
+        )
+        for used, checked_at in (
+            (1, "2026-10-19T09:00:00+00:00"),
+            (2, "2026-10-19T11:00:00+00:00"),
+            (3, "2026-10-19T10:00:00+00:00"),
+        ):
+            self.store.record_usage_snapshot(
+                created["id"],
+                {
+                    "checked_at": checked_at,
+                    "used": used,
+                    "limit": 20,
+                    "remaining": 20 - used,
+                    "unit": "USD",
+                    "provider_status": {},
+                },
+            )
+
+        self.assertEqual(
+            [3, 2, 1],
+            [item["used"] for item in self.store.usage_history(created["id"])],
+        )
+        self.assertEqual(
+            [3, 2],
+            [
+                item["used"]
+                for item in self.store.usage_history(
+                    created["id"], limit=2, chronological=True
+                )
+            ],
+        )
+
     def test_dashboard_never_persists_owner_or_provider_secrets(self) -> None:
         script = (
             Path(__file__).parents[1] / "src" / "keyguard" / "dashboard" / "app.js"
@@ -625,6 +664,23 @@ class FoundationTests(unittest.TestCase):
         self.assertIn('details.addEventListener("keyguard:refresh-history"', script)
         self.assertIn('new Event("keyguard:refresh-history")', script)
         self.assertIn("refreshPending = refreshPending || force", script)
+        self.assertIn("let refreshError = null", script)
+        self.assertIn("globalMessage.textContent === refreshError", script)
+        self.assertIn(
+            """if (loaded) {
+        refreshError = `Unable to refresh event history: ${error.message}`;
+        showMessage(refreshError, true);
+      } else {
+        content.replaceChildren""",
+            script,
+        )
+        self.assertIn(
+            """if (refreshError && globalMessage.textContent === refreshError) {
+        showMessage("");
+      }
+      refreshError = null;""",
+            script,
+        )
         self.assertIn("const polling = {...(credential.polling_config || {})}", script)
         self.assertIn("background && hasActiveInteraction()", script)
         self.assertIn(
@@ -800,10 +856,11 @@ class FoundationTests(unittest.TestCase):
             for index in range(15):
                 self.store.record_event(created["id"], "test_event", str(index))
             for index in range(15):
+                minute = {13: 14, 14: 13}.get(index, index)
                 self.store.record_usage_snapshot(
                     created["id"],
                     {
-                        "checked_at": f"2026-10-17T10:{index:02d}:00+00:00",
+                        "checked_at": f"2026-10-17T10:{minute:02d}:00+00:00",
                         "used": index,
                         "limit": 20,
                         "remaining": 20 - index,
@@ -824,15 +881,19 @@ class FoundationTests(unittest.TestCase):
             self.assertEqual(12, len(usage))
             self.assertEqual({"checked_at", "used", "unit"}, set(usage[0]))
             self.assertEqual(3, usage[0]["used"])
-            self.assertEqual(14, usage[-1]["used"])
+            self.assertEqual([14, 13], [item["used"] for item in usage[-2:]])
+            self.assertEqual(
+                sorted(item["checked_at"] for item in usage),
+                [item["checked_at"] for item in usage],
+            )
 
             for index in range(15, 115):
                 self.store.record_usage_snapshot(
                     created["id"],
                     {
                         "checked_at": (
-                            f"2026-10-{18 + (index - 15) // 60:02d}T11:"
-                            f"{index % 60:02d}:00+00:00"
+                            f"2026-10-18T{11 + (index - 15) // 60:02d}:"
+                            f"{(index - 15) % 60:02d}:00+00:00"
                         ),
                         "used": index,
                         "limit": 120,
