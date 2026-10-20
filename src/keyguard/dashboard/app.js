@@ -50,7 +50,8 @@ function showMessage(value, isError = false, owner = null) {
   globalMessageOwner = owner;
 }
 
-function reportHistoryRefreshError(credentialId, error) {
+function reportHistoryRefreshError(credentialId, error, panel) {
+  if (!panel.isConnected) return;
   const record = {
     message: `Unable to refresh event history: ${error.message}`,
     owner: {},
@@ -59,7 +60,8 @@ function reportHistoryRefreshError(credentialId, error) {
   showMessage(record.message, true, record.owner);
 }
 
-function clearHistoryRefreshError(credentialId) {
+function clearHistoryRefreshError(credentialId, panel) {
+  if (!panel.isConnected) return;
   const record = historyRefreshErrors.get(credentialId);
   if (
     record
@@ -443,10 +445,10 @@ function historyPanel(credential) {
       );
       content.replaceChildren(usageSparkline(usage), eventsSection);
       loaded = true;
-      clearHistoryRefreshError(credential.id);
+      clearHistoryRefreshError(credential.id, details);
     } catch (error) {
       if (loaded) {
-        reportHistoryRefreshError(credential.id, error);
+        reportHistoryRefreshError(credential.id, error, details);
       } else {
         content.replaceChildren(text("p", `${error.message} Close and reopen this panel to retry.`, "error"));
       }
