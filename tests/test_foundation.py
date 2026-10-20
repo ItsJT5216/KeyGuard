@@ -609,6 +609,7 @@ class FoundationTests(unittest.TestCase):
             (1, "2026-10-19T09:00:00+00:00"),
             (2, "2026-10-19T11:00:00+00:00"),
             (3, "2026-10-19T10:00:00+00:00"),
+            (4, "2026-10-19T11:00:00"),
         ):
             self.store.record_usage_snapshot(
                 created["id"],
@@ -623,15 +624,15 @@ class FoundationTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            [3, 2, 1],
+            [4, 3, 2, 1],
             [item["used"] for item in self.store.usage_history(created["id"])],
         )
         self.assertEqual(
-            [3, 2],
+            [3, 2, 4],
             [
                 item["used"]
                 for item in self.store.usage_history(
-                    created["id"], limit=2, chronological=True
+                    created["id"], limit=3, chronological=True
                 )
             ],
         )
@@ -664,33 +665,25 @@ class FoundationTests(unittest.TestCase):
         self.assertIn('details.addEventListener("keyguard:refresh-history"', script)
         self.assertIn('new Event("keyguard:refresh-history")', script)
         self.assertIn("refreshPending = refreshPending || force", script)
-        self.assertIn("let refreshError = null", script)
         self.assertIn("let globalMessageOwner = null", script)
+        self.assertIn("const historyRefreshErrors = new Map()", script)
         self.assertIn(
             "function showMessage(value, isError = false, owner = null)", script
         )
         self.assertIn("globalMessageOwner = owner", script)
-        self.assertIn("const refreshErrorOwner = {}", script)
-        self.assertIn("globalMessageOwner === refreshErrorOwner", script)
+        self.assertIn("function reportHistoryRefreshError(credentialId, error)", script)
+        self.assertIn("historyRefreshErrors.set(credentialId, record)", script)
+        self.assertIn("function clearHistoryRefreshError(credentialId)", script)
+        self.assertIn("globalMessageOwner === record.owner", script)
+        self.assertIn("historyRefreshErrors.delete(credentialId)", script)
         self.assertIn(
             """if (loaded) {
-        refreshError = `Unable to refresh event history: ${error.message}`;
-        showMessage(refreshError, true, refreshErrorOwner);
+        reportHistoryRefreshError(credential.id, error);
       } else {
         content.replaceChildren""",
             script,
         )
-        self.assertIn(
-            """if (
-        refreshError
-        && globalMessageOwner === refreshErrorOwner
-        && globalMessage.textContent === refreshError
-      ) {
-        showMessage("");
-      }
-      refreshError = null;""",
-            script,
-        )
+        self.assertIn("clearHistoryRefreshError(credential.id)", script)
         self.assertIn("const polling = {...(credential.polling_config || {})}", script)
         self.assertIn("background && hasActiveInteraction()", script)
         self.assertIn(
