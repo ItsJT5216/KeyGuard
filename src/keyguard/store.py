@@ -522,6 +522,8 @@ class Store:
         if chronological:
             history.reverse()
             history.sort(key=lambda item: checked_at_time(item["checked_at"]))
+            for item in history:
+                item["checked_at"] = checked_at_time(item["checked_at"]).isoformat()
         return history
 
     def dashboard_state(self, credential_id: str) -> dict[str, Any]:
