@@ -10,6 +10,7 @@ let loadSequence = 0;
 let saving = false;
 let backgroundRefreshError = null;
 let globalMessageOwner = null;
+const historyRefreshErrors = new Map();
 let foregroundRefreshPending = false;
 
 async function api(path, options = {}) {
@@ -47,6 +48,27 @@ function showMessage(value, isError = false, owner = null) {
   globalMessage.textContent = value;
   globalMessage.classList.toggle("error", isError);
   globalMessageOwner = owner;
+}
+
+function reportHistoryRefreshError(credentialId, error) {
+  const record = {
+    message: `Unable to refresh event history: ${error.message}`,
+    owner: {},
+  };
+  historyRefreshErrors.set(credentialId, record);
+  showMessage(record.message, true, record.owner);
+}
+
+function clearHistoryRefreshError(credentialId) {
+  const record = historyRefreshErrors.get(credentialId);
+  if (
+    record
+    && globalMessageOwner === record.owner
+    && globalMessage.textContent === record.message
+  ) {
+    showMessage("");
+  }
+  historyRefreshErrors.delete(credentialId);
 }
 
 function reportBackgroundRefreshError(error) {
@@ -397,11 +419,9 @@ function historyPanel(credential) {
   details.append(text("summary", "Event history"));
   const content = document.createElement("div");
   details.append(content);
-  const refreshErrorOwner = {};
   let loaded = false;
   let loading = false;
   let refreshPending = false;
-  let refreshError = null;
   async function loadHistory({force = false} = {}) {
     if (!details.open || (loaded && !force)) return;
     if (loading) {
@@ -423,18 +443,10 @@ function historyPanel(credential) {
       );
       content.replaceChildren(usageSparkline(usage), eventsSection);
       loaded = true;
-      if (
-        refreshError
-        && globalMessageOwner === refreshErrorOwner
-        && globalMessage.textContent === refreshError
-      ) {
-        showMessage("");
-      }
-      refreshError = null;
+      clearHistoryRefreshError(credential.id);
     } catch (error) {
       if (loaded) {
-        refreshError = `Unable to refresh event history: ${error.message}`;
-        showMessage(refreshError, true, refreshErrorOwner);
+        reportHistoryRefreshError(credential.id, error);
       } else {
         content.replaceChildren(text("p", `${error.message} Close and reopen this panel to retry.`, "error"));
       }
