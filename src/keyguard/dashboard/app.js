@@ -9,6 +9,7 @@ let sessionToken = window.sessionStorage.getItem("keyguardSession");
 let loadSequence = 0;
 let saving = false;
 let backgroundRefreshError = null;
+let globalMessageOwner = null;
 let foregroundRefreshPending = false;
 
 async function api(path, options = {}) {
@@ -42,9 +43,10 @@ function button(label, className = "") {
   return node;
 }
 
-function showMessage(value, isError = false) {
+function showMessage(value, isError = false, owner = null) {
   globalMessage.textContent = value;
   globalMessage.classList.toggle("error", isError);
+  globalMessageOwner = owner;
 }
 
 function reportBackgroundRefreshError(error) {
@@ -395,6 +397,7 @@ function historyPanel(credential) {
   details.append(text("summary", "Event history"));
   const content = document.createElement("div");
   details.append(content);
+  const refreshErrorOwner = {};
   let loaded = false;
   let loading = false;
   let refreshPending = false;
@@ -420,14 +423,18 @@ function historyPanel(credential) {
       );
       content.replaceChildren(usageSparkline(usage), eventsSection);
       loaded = true;
-      if (refreshError && globalMessage.textContent === refreshError) {
+      if (
+        refreshError
+        && globalMessageOwner === refreshErrorOwner
+        && globalMessage.textContent === refreshError
+      ) {
         showMessage("");
       }
       refreshError = null;
     } catch (error) {
       if (loaded) {
         refreshError = `Unable to refresh event history: ${error.message}`;
-        showMessage(refreshError, true);
+        showMessage(refreshError, true, refreshErrorOwner);
       } else {
         content.replaceChildren(text("p", `${error.message} Close and reopen this panel to retry.`, "error"));
       }
