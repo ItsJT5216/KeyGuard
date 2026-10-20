@@ -16,6 +16,11 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def checked_at_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 class Store:
     def __init__(self, path: Path, vault: Vault) -> None:
         self.path = path
@@ -516,6 +521,9 @@ class Store:
             history.append(item)
         if chronological:
             history.reverse()
+            history.sort(key=lambda item: checked_at_time(item["checked_at"]))
+            for item in history:
+                item["checked_at"] = checked_at_time(item["checked_at"]).isoformat()
         return history
 
     def dashboard_state(self, credential_id: str) -> dict[str, Any]:
