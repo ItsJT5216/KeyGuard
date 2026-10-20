@@ -636,6 +636,12 @@ class FoundationTests(unittest.TestCase):
                 )
             ],
         )
+        self.assertEqual(
+            "2026-10-19T11:00:00+00:00",
+            self.store.usage_history(
+                created["id"], limit=3, chronological=True
+            )[-1]["checked_at"],
+        )
 
     def test_dashboard_never_persists_owner_or_provider_secrets(self) -> None:
         script = (
@@ -671,19 +677,24 @@ class FoundationTests(unittest.TestCase):
             "function showMessage(value, isError = false, owner = null)", script
         )
         self.assertIn("globalMessageOwner = owner", script)
-        self.assertIn("function reportHistoryRefreshError(credentialId, error)", script)
+        self.assertIn(
+            "function reportHistoryRefreshError(credentialId, error, panel)", script
+        )
+        self.assertIn("if (!panel.isConnected) return", script)
         self.assertIn("historyRefreshErrors.set(credentialId, record)", script)
-        self.assertIn("function clearHistoryRefreshError(credentialId)", script)
+        self.assertIn(
+            "function clearHistoryRefreshError(credentialId, panel)", script
+        )
         self.assertIn("globalMessageOwner === record.owner", script)
         self.assertIn("historyRefreshErrors.delete(credentialId)", script)
         self.assertIn(
             """if (loaded) {
-        reportHistoryRefreshError(credential.id, error);
+        reportHistoryRefreshError(credential.id, error, details);
       } else {
         content.replaceChildren""",
             script,
         )
-        self.assertIn("clearHistoryRefreshError(credential.id)", script)
+        self.assertIn("clearHistoryRefreshError(credential.id, details)", script)
         self.assertIn("const polling = {...(credential.polling_config || {})}", script)
         self.assertIn("background && hasActiveInteraction()", script)
         self.assertIn(
