@@ -665,17 +665,27 @@ class FoundationTests(unittest.TestCase):
         self.assertIn('new Event("keyguard:refresh-history")', script)
         self.assertIn("refreshPending = refreshPending || force", script)
         self.assertIn("let refreshError = null", script)
-        self.assertIn("globalMessage.textContent === refreshError", script)
+        self.assertIn("let globalMessageOwner = null", script)
+        self.assertIn(
+            "function showMessage(value, isError = false, owner = null)", script
+        )
+        self.assertIn("globalMessageOwner = owner", script)
+        self.assertIn("const refreshErrorOwner = {}", script)
+        self.assertIn("globalMessageOwner === refreshErrorOwner", script)
         self.assertIn(
             """if (loaded) {
         refreshError = `Unable to refresh event history: ${error.message}`;
-        showMessage(refreshError, true);
+        showMessage(refreshError, true, refreshErrorOwner);
       } else {
         content.replaceChildren""",
             script,
         )
         self.assertIn(
-            """if (refreshError && globalMessage.textContent === refreshError) {
+            """if (
+        refreshError
+        && globalMessageOwner === refreshErrorOwner
+        && globalMessage.textContent === refreshError
+      ) {
         showMessage("");
       }
       refreshError = null;""",
