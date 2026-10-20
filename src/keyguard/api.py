@@ -259,7 +259,18 @@ def make_handler(
         sys_version = ""
 
         def log_message(self, format_string: str, *args: object) -> None:
-            LOGGER.info("%s - %s", self.client_address[0], format_string % args)
+            safe_args = args
+            if args and args[0] == self.requestline:
+                request_parts = self.requestline.split(" ", 2)
+                if len(request_parts) == 3:
+                    target = urlparse(request_parts[1])._replace(
+                        query="", fragment=""
+                    ).geturl()
+                    safe_requestline = " ".join(
+                        (request_parts[0], target, request_parts[2])
+                    )
+                    safe_args = (safe_requestline, *args[1:])
+            LOGGER.info("%s - %s", self.client_address[0], format_string % safe_args)
 
         def _security_headers(self, *, api: bool = False) -> None:
             self.send_header("X-Content-Type-Options", "nosniff")

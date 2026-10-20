@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import logging
 import sqlite3
 import tempfile
 import threading
@@ -189,6 +191,42 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("monitoring_paused", event_types)
         self.assertIn("monitoring_resumed", event_types)
         self.assertEqual(1, len(self.store.history(created["id"], limit=1)))
+
+    def test_api_access_log_redacts_query_string(self) -> None:
+        token = "test-token-that-is-long-enough-123456"
+        server = create_server(self.store, token, 0)
+        session = authorize(server)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        secret = "query-secret-must-not-be-logged"
+        capture = io.StringIO()
+        handler = logging.StreamHandler(capture)
+        logger = logging.getLogger("keyguard")
+        original_level = logger.level
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+
+        try:
+            request = urllib.request.Request(
+                f"{base}/api/credentials?api_key={secret}",
+                headers={"Authorization": f"KeyGuard-Session {session}"},
+            )
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(200, response.status)
+                response.read()
+
+            log_output = capture.getvalue()
+            self.assertIn("/api/credentials", log_output)
+            self.assertNotIn(secret, log_output)
+            self.assertNotIn("api_key=", log_output)
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(original_level)
+            handler.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_api_never_returns_raw_secret_and_rejects_remote_origin(self) -> None:
         token = "test-token-that-is-long-enough-123456"
