@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
+import logging
+import socket
 import sqlite3
 import tempfile
 import threading
@@ -189,6 +192,87 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("monitoring_paused", event_types)
         self.assertIn("monitoring_resumed", event_types)
         self.assertEqual(1, len(self.store.history(created["id"], limit=1)))
+
+    def test_api_access_log_redacts_query_string(self) -> None:
+        token = "test-token-that-is-long-enough-123456"
+        server = create_server(self.store, token, 0)
+        session = authorize(server)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        secret = "query-secret-must-not-be-logged"
+        capture = io.StringIO()
+        handler = logging.StreamHandler(capture)
+        logger = logging.getLogger("keyguard")
+        original_level = logger.level
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+
+        def send_raw(request: bytes) -> bytes:
+            response = bytearray()
+            with socket.create_connection(
+                ("127.0.0.1", server.server_port), timeout=2
+            ) as client:
+                client.sendall(request)
+                client.shutdown(socket.SHUT_WR)
+                while chunk := client.recv(4096):
+                    response.extend(chunk)
+            return bytes(response)
+
+        try:
+            request = urllib.request.Request(
+                f"{base}/api/credentials?api_key={secret}",
+                headers={"Authorization": f"KeyGuard-Session {session}"},
+            )
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(200, response.status)
+                response.read()
+
+            host = f"Host: 127.0.0.1:{server.server_port}\r\n".encode()
+            raw_requests = {
+                "repeated spaces": (
+                    f"GET  /api/status?api_key={secret}-spaces HTTP/1.1\r\n".encode()
+                    + host
+                    + b"Connection: close\r\n\r\n"
+                ),
+                "tabs": (
+                    f"GET\t/api/status?api_key={secret}-tabs\tHTTP/1.1\r\n".encode()
+                    + host
+                    + b"Connection: close\r\n\r\n"
+                ),
+                "http 0.9": f"GET /?api_key={secret}-http09\r\n".encode(),
+                "parser error": (
+                    f"GET /api/status?api_key={secret}-parser EXTRA HTTP/1.1\r\n".encode()
+                    + host
+                    + b"Connection: close\r\n\r\n"
+                ),
+                "malformed absolute target": (
+                    f"GET //[/?api_key={secret}-absolute HTTP/1.1\r\n".encode()
+                    + host
+                    + b"Connection: close\r\n\r\n"
+                ),
+                "fragment": (
+                    f"GET /api/status#{secret}-fragment HTTP/1.1\r\n".encode()
+                    + host
+                    + b"Connection: close\r\n\r\n"
+                ),
+            }
+            for label, raw_request in raw_requests.items():
+                with self.subTest(label=label):
+                    send_raw(raw_request)
+
+            log_output = capture.getvalue()
+            self.assertIn("/api/credentials", log_output)
+            self.assertIn("/api/status", log_output)
+            self.assertNotIn(secret, log_output)
+            self.assertNotIn("api_key=", log_output)
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(original_level)
+            handler.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_api_never_returns_raw_secret_and_rejects_remote_origin(self) -> None:
         token = "test-token-that-is-long-enough-123456"
