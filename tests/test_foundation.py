@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
+import logging
+import socket
 import sqlite3
 import tempfile
 import threading
@@ -189,6 +192,87 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("monitoring_paused", event_types)
         self.assertIn("monitoring_resumed", event_types)
         self.assertEqual(1, len(self.store.history(created["id"], limit=1)))
+
+    def test_api_access_log_redacts_query_string(self) -> None:
+        token = "test-token-that-is-long-enough-123456"
+        server = create_server(self.store, token, 0)
+        session = authorize(server)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        secret = "query-secret-must-not-be-logged"
+        capture = io.StringIO()
+        handler = logging.StreamHandler(capture)
+        logger = logging.getLogger("keyguard")
+        original_level = logger.level
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+
+        def send_raw(request: bytes) -> bytes:
+            response = bytearray()
+            with socket.create_connection(
+                ("127.0.0.1", server.server_port), timeout=2
+            ) as client:
+                client.sendall(request)
+                client.shutdown(socket.SHUT_WR)
+                while chunk := client.recv(4096):
+                    response.extend(chunk)
+            return bytes(response)
+
+        try:
+            request = urllib.request.Request(
+                f"{base}/api/credentials?api_key={secret}",
+                headers={"Authorization": f"KeyGuard-Session {session}"},
+            )
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(200, response.status)
+                response.read()
+
+            host = f"Host: 127.0.0.1:{server.server_port}\r\n".encode()
+            raw_requests = {
+                "repeated spaces": (
+                    f"GET  /api/status?api_key={secret}-spaces HTTP/1.1\r\n".encode()
+                    + host
+                    + b"Connection: close\r\n\r\n"
+                ),
+                "tabs": (
+                    f"GET\t/api/status?api_key={secret}-tabs\tHTTP/1.1\r\n".encode()
+                    + host
+                    + b"Connection: close\r\n\r\n"
+                ),
+                "http 0.9": f"GET /?api_key={secret}-http09\r\n".encode(),
+                "parser error": (
+                    f"GET /api/status?api_key={secret}-parser EXTRA HTTP/1.1\r\n".encode()
+                    + host
+                    + b"Connection: close\r\n\r\n"
+                ),
+                "malformed absolute target": (
+                    f"GET //[/?api_key={secret}-absolute HTTP/1.1\r\n".encode()
+                    + host
+                    + b"Connection: close\r\n\r\n"
+                ),
+                "fragment": (
+                    f"GET /api/status#{secret}-fragment HTTP/1.1\r\n".encode()
+                    + host
+                    + b"Connection: close\r\n\r\n"
+                ),
+            }
+            for label, raw_request in raw_requests.items():
+                with self.subTest(label=label):
+                    send_raw(raw_request)
+
+            log_output = capture.getvalue()
+            self.assertIn("/api/credentials", log_output)
+            self.assertIn("/api/status", log_output)
+            self.assertNotIn(secret, log_output)
+            self.assertNotIn("api_key=", log_output)
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(original_level)
+            handler.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_api_never_returns_raw_secret_and_rejects_remote_origin(self) -> None:
         token = "test-token-that-is-long-enough-123456"
@@ -597,6 +681,52 @@ class FoundationTests(unittest.TestCase):
         )
         self.assertGreater(BOOTSTRAP_TTL_SECONDS, 0)
 
+    def test_usage_history_bounds_newest_rows_then_sorts_by_checked_at(self) -> None:
+        created = self.store.create_credential(
+            provider="Example",
+            name="Out of order",
+            secret="secret",
+            threshold=15,
+            auto_protect=False,
+        )
+        for used, checked_at in (
+            (1, "2026-10-19T09:00:00+00:00"),
+            (2, "2026-10-19T11:00:00+00:00"),
+            (3, "2026-10-19T10:00:00+00:00"),
+            (4, "2026-10-19T11:00:00"),
+        ):
+            self.store.record_usage_snapshot(
+                created["id"],
+                {
+                    "checked_at": checked_at,
+                    "used": used,
+                    "limit": 20,
+                    "remaining": 20 - used,
+                    "unit": "USD",
+                    "provider_status": {},
+                },
+            )
+
+        self.assertEqual(
+            [4, 3, 2, 1],
+            [item["used"] for item in self.store.usage_history(created["id"])],
+        )
+        self.assertEqual(
+            [3, 2, 4],
+            [
+                item["used"]
+                for item in self.store.usage_history(
+                    created["id"], limit=3, chronological=True
+                )
+            ],
+        )
+        self.assertEqual(
+            "2026-10-19T11:00:00+00:00",
+            self.store.usage_history(
+                created["id"], limit=3, chronological=True
+            )[-1]["checked_at"],
+        )
+
     def test_dashboard_never_persists_owner_or_provider_secrets(self) -> None:
         script = (
             Path(__file__).parents[1] / "src" / "keyguard" / "dashboard" / "app.js"
@@ -625,6 +755,30 @@ class FoundationTests(unittest.TestCase):
         self.assertIn('details.addEventListener("keyguard:refresh-history"', script)
         self.assertIn('new Event("keyguard:refresh-history")', script)
         self.assertIn("refreshPending = refreshPending || force", script)
+        self.assertIn("let globalMessageOwner = null", script)
+        self.assertIn("const historyRefreshErrors = new Map()", script)
+        self.assertIn(
+            "function showMessage(value, isError = false, owner = null)", script
+        )
+        self.assertIn("globalMessageOwner = owner", script)
+        self.assertIn(
+            "function reportHistoryRefreshError(credentialId, error, panel)", script
+        )
+        self.assertIn("if (!panel.isConnected) return", script)
+        self.assertIn("historyRefreshErrors.set(credentialId, record)", script)
+        self.assertIn(
+            "function clearHistoryRefreshError(credentialId, panel)", script
+        )
+        self.assertIn("globalMessageOwner === record.owner", script)
+        self.assertIn("historyRefreshErrors.delete(credentialId)", script)
+        self.assertIn(
+            """if (loaded) {
+        reportHistoryRefreshError(credential.id, error, details);
+      } else {
+        content.replaceChildren""",
+            script,
+        )
+        self.assertIn("clearHistoryRefreshError(credential.id, details)", script)
         self.assertIn("const polling = {...(credential.polling_config || {})}", script)
         self.assertIn("background && hasActiveInteraction()", script)
         self.assertIn(
@@ -818,10 +972,11 @@ class FoundationTests(unittest.TestCase):
             for index in range(15):
                 self.store.record_event(created["id"], "test_event", str(index))
             for index in range(15):
+                minute = {13: 14, 14: 13}.get(index, index)
                 self.store.record_usage_snapshot(
                     created["id"],
                     {
-                        "checked_at": f"2026-10-17T10:{index:02d}:00+00:00",
+                        "checked_at": f"2026-10-17T10:{minute:02d}:00+00:00",
                         "used": index,
                         "limit": 20,
                         "remaining": 20 - index,
@@ -842,15 +997,19 @@ class FoundationTests(unittest.TestCase):
             self.assertEqual(12, len(usage))
             self.assertEqual({"checked_at", "used", "unit"}, set(usage[0]))
             self.assertEqual(3, usage[0]["used"])
-            self.assertEqual(14, usage[-1]["used"])
+            self.assertEqual([14, 13], [item["used"] for item in usage[-2:]])
+            self.assertEqual(
+                sorted(item["checked_at"] for item in usage),
+                [item["checked_at"] for item in usage],
+            )
 
             for index in range(15, 115):
                 self.store.record_usage_snapshot(
                     created["id"],
                     {
                         "checked_at": (
-                            f"2026-10-{18 + (index - 15) // 60:02d}T11:"
-                            f"{index % 60:02d}:00+00:00"
+                            f"2026-10-18T{11 + (index - 15) // 60:02d}:"
+                            f"{(index - 15) % 60:02d}:00+00:00"
                         ),
                         "used": index,
                         "limit": 120,

@@ -9,6 +9,8 @@ let sessionToken = window.sessionStorage.getItem("keyguardSession");
 let loadSequence = 0;
 let saving = false;
 let backgroundRefreshError = null;
+let globalMessageOwner = null;
+const historyRefreshErrors = new Map();
 let foregroundRefreshPending = false;
 
 async function api(path, options = {}) {
@@ -42,9 +44,33 @@ function button(label, className = "") {
   return node;
 }
 
-function showMessage(value, isError = false) {
+function showMessage(value, isError = false, owner = null) {
   globalMessage.textContent = value;
   globalMessage.classList.toggle("error", isError);
+  globalMessageOwner = owner;
+}
+
+function reportHistoryRefreshError(credentialId, error, panel) {
+  if (!panel.isConnected) return;
+  const record = {
+    message: `Unable to refresh event history: ${error.message}`,
+    owner: {},
+  };
+  historyRefreshErrors.set(credentialId, record);
+  showMessage(record.message, true, record.owner);
+}
+
+function clearHistoryRefreshError(credentialId, panel) {
+  if (!panel.isConnected) return;
+  const record = historyRefreshErrors.get(credentialId);
+  if (
+    record
+    && globalMessageOwner === record.owner
+    && globalMessage.textContent === record.message
+  ) {
+    showMessage("");
+  }
+  historyRefreshErrors.delete(credentialId);
 }
 
 function reportBackgroundRefreshError(error) {
@@ -423,9 +449,10 @@ function historyPanel(credential) {
       );
       content.replaceChildren(usageSparkline(usage), eventsSection);
       loaded = true;
+      clearHistoryRefreshError(credential.id, details);
     } catch (error) {
       if (loaded) {
-        showMessage(`Unable to refresh event history: ${error.message}`, true);
+        reportHistoryRefreshError(credential.id, error, details);
       } else {
         content.replaceChildren(text("p", `${error.message} Close and reopen this panel to retry.`, "error"));
       }

@@ -258,8 +258,40 @@ def make_handler(
         server_version = "KeyGuard"
         sys_version = ""
 
+        @staticmethod
+        def _redact_request_target(target: str) -> str:
+            query_index = target.find("?")
+            fragment_index = target.find("#")
+            suffix_indexes = [
+                index for index in (query_index, fragment_index) if index >= 0
+            ]
+            return target[: min(suffix_indexes)] if suffix_indexes else target
+
+        def _safe_requestline(self) -> str:
+            request_parts = self.requestline.split()
+            if len(request_parts) < 2:
+                return "<malformed request>"
+            request_parts[1] = self._redact_request_target(request_parts[1])
+            return " ".join(request_parts)
+
         def log_message(self, format_string: str, *args: object) -> None:
-            LOGGER.info("%s - %s", self.client_address[0], format_string % args)
+            safe_args = args
+            unsafe_requestline = getattr(self, "requestline", "")
+            if unsafe_requestline:
+                safe_requestline = self._safe_requestline()
+                unsafe_repr = repr(unsafe_requestline)
+                safe_repr = repr(safe_requestline)
+                safe_args = tuple(
+                    (
+                        value.replace(unsafe_repr, safe_repr).replace(
+                            unsafe_requestline, safe_requestline
+                        )
+                        if isinstance(value, str)
+                        else value
+                    )
+                    for value in args
+                )
+            LOGGER.info("%s - %s", self.client_address[0], format_string % safe_args)
 
         def _security_headers(self, *, api: bool = False) -> None:
             self.send_header("X-Content-Type-Options", "nosniff")
