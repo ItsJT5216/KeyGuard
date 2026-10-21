@@ -245,12 +245,15 @@ function pollingEditor(credential) {
     ["accelerated_interval_seconds", "Accelerated interval (seconds)"],
     ["critical_interval_seconds", "Critical interval (seconds)"],
     ["urgent_interval_seconds", "Urgent interval (seconds)"],
+    ["safety_margin_seconds", "Safety margin (seconds)"],
+    ["jitter_fraction", "Jitter fraction (0–0.5)"],
   ];
   for (const [name, labelText] of fields) {
     const input = document.createElement("input");
     input.name = name;
     input.type = "number";
     input.min = name.includes("interval") ? "1" : "0";
+    if (name === "jitter_fraction") input.max = "0.5";
     input.step = "any";
     input.value = credential.polling_config?.[name] ?? "";
     const label = text("label", labelText);
@@ -335,6 +338,7 @@ function editForm(credential) {
       "quiet_distance", "watch_distance", "accelerated_distance", "critical_distance",
       "quiet_interval_seconds", "watch_interval_seconds", "accelerated_interval_seconds",
       "critical_interval_seconds", "urgent_interval_seconds",
+      "safety_margin_seconds", "jitter_fraction",
     ]) {
       const value = data.get(name);
       if (value !== "") polling[name] = Number(value);

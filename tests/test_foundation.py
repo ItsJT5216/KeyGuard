@@ -806,6 +806,24 @@ class FoundationTests(unittest.TestCase):
         self.assertIn('function daysUntil(value, elapsed = "Expired")', script)
         self.assertIn("return elapsed", script)
 
+    def test_polling_editor_exposes_safety_margin_and_caps_jitter(self) -> None:
+        script = (
+            Path(__file__).parents[1] / "src" / "keyguard" / "dashboard" / "app.js"
+        ).read_text()
+
+        self.assertIn(
+            '["safety_margin_seconds", "Safety margin (seconds)"]',
+            script,
+        )
+        self.assertIn(
+            '["jitter_fraction", "Jitter fraction (0–0.5)"]',
+            script,
+        )
+        self.assertIn('if (name === "jitter_fraction") input.max = "0.5";', script)
+        polling_fields = script.split("for (const name of [", 1)[1].split("]) {", 1)[0]
+        self.assertIn('"safety_margin_seconds"', polling_fields)
+        self.assertIn('"jitter_fraction"', polling_fields)
+
     def test_background_refresh_failure_preserves_last_known_dashboard_state(self) -> None:
         script = (
             Path(__file__).parents[1] / "src" / "keyguard" / "dashboard" / "app.js"
