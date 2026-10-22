@@ -53,6 +53,16 @@ def _write_port(port: int) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _clear_port(port: int) -> None:
+    path = runtime_port_path()
+    try:
+        recorded_port = int(path.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return
+    if recorded_port == port:
+        path.unlink(missing_ok=True)
+
+
 def serve() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
@@ -70,15 +80,19 @@ def serve() -> None:
     logging.getLogger("keyguard").info(
         "KeyGuard listening on 127.0.0.1:%s", server.server_port
     )
-    server.scheduler_runner.start()
+    runner_started = False
     try:
+        server.scheduler_runner.start()
+        runner_started = True
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.scheduler_runner.stop()
-        server.scheduler_runner.join()
+        if runner_started:
+            server.scheduler_runner.stop()
+            server.scheduler_runner.join()
         server.server_close()
+        _clear_port(server.server_port)
         store.close()
 
 
@@ -298,5 +312,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 

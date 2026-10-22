@@ -1319,6 +1319,19 @@ class FoundationTests(unittest.TestCase):
             self.assertEqual(24567, cli._read_port())
         self.assertEqual(0o600, port_path.stat().st_mode & 0o777)
 
+    def test_runtime_port_cleanup_removes_only_the_stopping_daemon_record(
+        self,
+    ) -> None:
+        port_path = Path(self.temp.name) / "daemon-port"
+        with patch.object(cli, "runtime_port_path", return_value=port_path):
+            cli._write_port(24567)
+            cli._clear_port(24567)
+            self.assertFalse(port_path.exists())
+
+            cli._write_port(24568)
+            cli._clear_port(24567)
+            self.assertEqual(24568, cli._read_port())
+
     def test_delete_removes_secret_and_database_record(self) -> None:
         created = self.store.create_credential(
             provider="Example",
@@ -1334,3 +1347,4 @@ class FoundationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
