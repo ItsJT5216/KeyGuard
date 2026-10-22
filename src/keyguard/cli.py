@@ -99,13 +99,13 @@ def serve() -> None:
         if not preferred_port:
             raise
         server = create_server(store, token, 0)
-    _write_port(server.server_port)
-    logging.getLogger("keyguard").info(
-        "KeyGuard listening on 127.0.0.1:%s", server.server_port
-    )
     runner_started = False
     previous_sigterm_handler = signal.signal(signal.SIGTERM, _handle_termination)
     try:
+        _write_port(server.server_port)
+        logging.getLogger("keyguard").info(
+            "KeyGuard listening on 127.0.0.1:%s", server.server_port
+        )
         server.scheduler_runner.start()
         runner_started = True
         server.serve_forever()
