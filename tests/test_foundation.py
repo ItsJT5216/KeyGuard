@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import signal
 import socket
 import sqlite3
 import tempfile
@@ -1331,6 +1332,85 @@ class FoundationTests(unittest.TestCase):
             cli._write_port(24568)
             cli._clear_port(24567)
             self.assertEqual(24568, cli._read_port())
+
+    def test_runtime_port_cleanup_serializes_replacement_publish(self) -> None:
+        port_path = Path(self.temp.name) / "daemon-port"
+        read_started = threading.Event()
+        release_read = threading.Event()
+        writer_finished = threading.Event()
+        path_type = type(port_path)
+        original_read_text = path_type.read_text
+
+        def blocking_read_text(path, *args, **kwargs):
+            value = original_read_text(path, *args, **kwargs)
+            if path == port_path and threading.current_thread().name == "cleanup":
+                read_started.set()
+                release_read.wait(timeout=2)
+            return value
+
+        with (
+            patch.object(cli, "runtime_port_path", return_value=port_path),
+            patch.object(path_type, "read_text", blocking_read_text),
+        ):
+            cli._write_port(24567)
+            cleanup = threading.Thread(
+                target=cli._clear_port, args=(24567,), name="cleanup"
+            )
+            writer = threading.Thread(
+                target=lambda: (cli._write_port(24568), writer_finished.set())
+            )
+            cleanup.start()
+            self.assertTrue(read_started.wait(timeout=1))
+            writer.start()
+            self.assertFalse(writer_finished.wait(timeout=0.05))
+            release_read.set()
+            cleanup.join(timeout=2)
+            writer.join(timeout=2)
+            self.assertFalse(cleanup.is_alive())
+            self.assertFalse(writer.is_alive())
+            self.assertEqual(24568, cli._read_port())
+
+    def test_sigterm_runs_cleanup_before_releasing_the_daemon_port(self) -> None:
+        server = MagicMock()
+        server.server_port = 24567
+        installed_handler = {}
+        events = []
+
+        def install_handler(signum, handler):
+            if handler is signal.SIG_DFL:
+                events.append("restore-sigterm")
+            else:
+                installed_handler[signum] = handler
+            return signal.SIG_DFL
+
+        def stop_from_systemd():
+            installed_handler[signal.SIGTERM](signal.SIGTERM, None)
+
+        server.serve_forever.side_effect = stop_from_systemd
+        server.server_close.side_effect = lambda: events.append("server-close")
+        store = MagicMock()
+        with (
+            patch.object(cli, "Store", return_value=store),
+            patch.object(cli, "KeyringVault"),
+            patch.object(cli, "database_path", return_value=self.path),
+            patch.object(
+                cli, "auth_token_path", return_value=Path(self.temp.name) / "token"
+            ),
+            patch.object(cli, "load_or_create_token", return_value="token"),
+            patch.object(cli, "create_server", return_value=server),
+            patch.object(cli, "_write_port"),
+            patch.object(
+                cli, "_clear_port", side_effect=lambda _port: events.append("clear")
+            ) as clear_port,
+            patch.object(cli.signal, "signal", side_effect=install_handler),
+        ):
+            cli.serve()
+
+        clear_port.assert_called_once_with(24567)
+        server.scheduler_runner.stop.assert_called_once_with()
+        server.scheduler_runner.join.assert_called_once_with()
+        store.close.assert_called_once_with()
+        self.assertLess(events.index("clear"), events.index("server-close"))
 
     def test_delete_removes_secret_and_database_record(self) -> None:
         created = self.store.create_credential(
