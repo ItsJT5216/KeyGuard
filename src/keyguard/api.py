@@ -297,13 +297,12 @@ def make_handler(
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Cache-Control", "no-store")
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; connect-src 'self'; script-src 'self'; "
                 "style-src 'self'; img-src 'self' data:; frame-ancestors 'none'",
             )
-            if api:
-                self.send_header("Cache-Control", "no-store")
 
         def _json(self, status: int, payload: Any) -> None:
             body = json.dumps(

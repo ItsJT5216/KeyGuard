@@ -650,10 +650,13 @@ class FoundationTests(unittest.TestCase):
             with urllib.request.urlopen(f"{base}/") as response:
                 page = response.read()
                 policy = response.headers["Content-Security-Policy"]
+                page_cache = response.headers["Cache-Control"]
             with urllib.request.urlopen(f"{base}/app.js") as response:
                 script = response.read()
+                script_cache = response.headers["Cache-Control"]
             with urllib.request.urlopen(f"{base}/style.css") as response:
                 styles = response.read()
+                styles_cache = response.headers["Cache-Control"]
 
             self.assertIn(b'id="credentials"', page)
             self.assertIn(b"sortCredentials", script)
@@ -665,6 +668,9 @@ class FoundationTests(unittest.TestCase):
             self.assertIn("script-src 'self'", policy)
             self.assertIn("style-src 'self'", policy)
             self.assertNotIn("unsafe-inline", policy)
+            self.assertEqual("no-store", page_cache)
+            self.assertEqual("no-store", script_cache)
+            self.assertEqual("no-store", styles_cache)
         finally:
             server.shutdown()
             server.server_close()
