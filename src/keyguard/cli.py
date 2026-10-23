@@ -91,14 +91,18 @@ def serve() -> None:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
     store = Store(database_path(), KeyringVault())
-    token = load_or_create_token(auth_token_path())
-    preferred_port = _read_port() or 0
     try:
-        server = create_server(store, token, preferred_port)
-    except OSError:
-        if not preferred_port:
-            raise
-        server = create_server(store, token, 0)
+        token = load_or_create_token(auth_token_path())
+        preferred_port = _read_port() or 0
+        try:
+            server = create_server(store, token, preferred_port)
+        except OSError:
+            if not preferred_port:
+                raise
+            server = create_server(store, token, 0)
+    except BaseException:
+        store.close()
+        raise
     runner_started = False
     previous_sigterm_handler = signal.signal(signal.SIGTERM, _handle_termination)
     try:
