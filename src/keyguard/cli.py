@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import hmac
 import json
@@ -8,6 +9,7 @@ import logging
 import os
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -37,20 +39,51 @@ def _read_port() -> int | None:
     return value if 1024 <= value <= 65535 else None
 
 
-def _write_port(port: int) -> None:
+def _open_port_lock():
     path = runtime_port_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(16)}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    lock_path = path.with_name(f".{path.name}.lock")
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    handle = os.fdopen(descriptor, "w")
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return path, handle
+
+
+def _write_port(port: int) -> None:
+    path, lock = _open_port_lock()
     try:
-        with os.fdopen(descriptor, "w") as handle:
-            handle.write(f"{port}\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        path.chmod(0o600)
+        temporary = path.with_name(f".{path.name}.{secrets.token_hex(16)}.tmp")
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
+        try:
+            with os.fdopen(descriptor, "w") as handle:
+                handle.write(f"{port}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            path.chmod(0o600)
+        finally:
+            temporary.unlink(missing_ok=True)
     finally:
-        temporary.unlink(missing_ok=True)
+        lock.close()
+
+
+def _clear_port(port: int) -> None:
+    path, lock = _open_port_lock()
+    try:
+        try:
+            recorded_port = int(path.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            return
+        if recorded_port == port:
+            path.unlink(missing_ok=True)
+    finally:
+        lock.close()
+
+
+def _handle_termination(_signum, _frame) -> None:
+    raise KeyboardInterrupt
 
 
 def serve() -> None:
@@ -66,20 +99,43 @@ def serve() -> None:
         if not preferred_port:
             raise
         server = create_server(store, token, 0)
-    _write_port(server.server_port)
-    logging.getLogger("keyguard").info(
-        "KeyGuard listening on 127.0.0.1:%s", server.server_port
-    )
-    server.scheduler_runner.start()
+    runner_started = False
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, _handle_termination)
     try:
+        _write_port(server.server_port)
+        logging.getLogger("keyguard").info(
+            "KeyGuard listening on 127.0.0.1:%s", server.server_port
+        )
+        runner_started = True
+        server.scheduler_runner.start()
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.scheduler_runner.stop()
-        server.scheduler_runner.join()
-        server.server_close()
-        store.close()
+        try:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
+        finally:
+            try:
+                if runner_started:
+                    server.scheduler_runner.stop()
+                    try:
+                        server.scheduler_runner.join()
+                    except RuntimeError:
+                        if server.scheduler_runner.ident is not None:
+                            raise
+            finally:
+                try:
+                    try:
+                        _clear_port(server.server_port)
+                    except OSError:
+                        logging.getLogger("keyguard").exception(
+                            "Failed to clear the daemon discovery port record"
+                        )
+                finally:
+                    try:
+                        server.server_close()
+                    finally:
+                        store.close()
 
 
 def _challenge(port: int, token: str) -> bool:
