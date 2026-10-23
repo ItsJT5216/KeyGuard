@@ -1312,6 +1312,53 @@ class FoundationTests(unittest.TestCase):
             new=2,
         )
 
+    def test_serve_closes_store_when_auth_token_initialization_fails(self) -> None:
+        store = MagicMock()
+        with (
+            patch.object(cli, "Store", return_value=store),
+            patch.object(cli, "KeyringVault"),
+            patch.object(cli, "database_path", return_value=self.path),
+            patch.object(
+                cli, "auth_token_path", return_value=Path(self.temp.name) / "token"
+            ),
+            patch.object(
+                cli,
+                "load_or_create_token",
+                side_effect=RuntimeError("token initialization failed"),
+            ),
+            patch.object(cli, "create_server") as create_server,
+            self.assertRaisesRegex(RuntimeError, "token initialization failed"),
+        ):
+            cli.serve()
+
+        store.close.assert_called_once_with()
+        create_server.assert_not_called()
+
+    def test_serve_closes_store_when_all_bind_attempts_fail(self) -> None:
+        store = MagicMock()
+        with (
+            patch.object(cli, "Store", return_value=store),
+            patch.object(cli, "KeyringVault"),
+            patch.object(cli, "database_path", return_value=self.path),
+            patch.object(
+                cli, "auth_token_path", return_value=Path(self.temp.name) / "token"
+            ),
+            patch.object(cli, "load_or_create_token", return_value="token"),
+            patch.object(cli, "_read_port", return_value=24567),
+            patch.object(
+                cli,
+                "create_server",
+                side_effect=[OSError("preferred port busy"), OSError("bind failed")],
+            ) as create_server,
+            self.assertRaisesRegex(OSError, "bind failed"),
+        ):
+            cli.serve()
+
+        self.assertEqual(
+            [24567, 0], [call.args[2] for call in create_server.call_args_list]
+        )
+        store.close.assert_called_once_with()
+
     def test_runtime_port_is_owner_only_and_not_host_wide_fixed(self) -> None:
         port_path = Path(self.temp.name) / "daemon-port"
         with patch.object(cli, "runtime_port_path", return_value=port_path):
