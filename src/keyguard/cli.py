@@ -106,19 +106,31 @@ def serve() -> None:
         logging.getLogger("keyguard").info(
             "KeyGuard listening on 127.0.0.1:%s", server.server_port
         )
-        server.scheduler_runner.start()
         runner_started = True
+        server.scheduler_runner.start()
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        signal.signal(signal.SIGTERM, previous_sigterm_handler)
-        if runner_started:
-            server.scheduler_runner.stop()
-            server.scheduler_runner.join()
-        _clear_port(server.server_port)
-        server.server_close()
-        store.close()
+        try:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
+        finally:
+            try:
+                if runner_started:
+                    server.scheduler_runner.stop()
+                    try:
+                        server.scheduler_runner.join()
+                    except RuntimeError:
+                        if server.scheduler_runner.ident is not None:
+                            raise
+            finally:
+                try:
+                    _clear_port(server.server_port)
+                finally:
+                    try:
+                        server.server_close()
+                    finally:
+                        store.close()
 
 
 def _challenge(port: int, token: str) -> bool:

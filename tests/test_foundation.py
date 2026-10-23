@@ -1412,6 +1412,99 @@ class FoundationTests(unittest.TestCase):
         store.close.assert_called_once_with()
         self.assertLess(events.index("clear"), events.index("server-close"))
 
+    def test_sigterm_during_scheduler_start_still_stops_and_joins_runner(
+        self,
+    ) -> None:
+        server = MagicMock()
+        server.server_port = 24567
+        installed_handler = {}
+
+        def install_handler(signum, handler):
+            installed_handler[signum] = handler
+            return signal.SIG_DFL
+
+        def interrupted_start():
+            installed_handler[signal.SIGTERM](signal.SIGTERM, None)
+
+        server.scheduler_runner.start.side_effect = interrupted_start
+        store = MagicMock()
+        with (
+            patch.object(cli, "Store", return_value=store),
+            patch.object(cli, "KeyringVault"),
+            patch.object(cli, "database_path", return_value=self.path),
+            patch.object(
+                cli, "auth_token_path", return_value=Path(self.temp.name) / "token"
+            ),
+            patch.object(cli, "load_or_create_token", return_value="token"),
+            patch.object(cli, "create_server", return_value=server),
+            patch.object(cli, "_write_port"),
+            patch.object(cli, "_clear_port"),
+            patch.object(cli.signal, "signal", side_effect=install_handler),
+        ):
+            cli.serve()
+
+        server.scheduler_runner.stop.assert_called_once_with()
+        server.scheduler_runner.join.assert_called_once_with()
+        server.server_close.assert_called_once_with()
+        store.close.assert_called_once_with()
+
+    def test_unstarted_scheduler_join_error_does_not_skip_resource_cleanup(
+        self,
+    ) -> None:
+        server = MagicMock()
+        server.server_port = 24567
+        server.scheduler_runner.start.side_effect = KeyboardInterrupt
+        server.scheduler_runner.join.side_effect = RuntimeError(
+            "cannot join thread before it is started"
+        )
+        server.scheduler_runner.ident = None
+        store = MagicMock()
+        with (
+            patch.object(cli, "Store", return_value=store),
+            patch.object(cli, "KeyringVault"),
+            patch.object(cli, "database_path", return_value=self.path),
+            patch.object(
+                cli, "auth_token_path", return_value=Path(self.temp.name) / "token"
+            ),
+            patch.object(cli, "load_or_create_token", return_value="token"),
+            patch.object(cli, "create_server", return_value=server),
+            patch.object(cli, "_write_port"),
+            patch.object(cli, "_clear_port"),
+            patch.object(cli.signal, "signal", return_value=signal.SIG_DFL),
+        ):
+            cli.serve()
+
+        server.scheduler_runner.stop.assert_called_once_with()
+        server.scheduler_runner.join.assert_called_once_with()
+        server.server_close.assert_called_once_with()
+        store.close.assert_called_once_with()
+
+    def test_port_cleanup_failure_still_closes_server_and_store(self) -> None:
+        server = MagicMock()
+        server.server_port = 24567
+        server.serve_forever.side_effect = KeyboardInterrupt
+        store = MagicMock()
+        with (
+            patch.object(cli, "Store", return_value=store),
+            patch.object(cli, "KeyringVault"),
+            patch.object(cli, "database_path", return_value=self.path),
+            patch.object(
+                cli, "auth_token_path", return_value=Path(self.temp.name) / "token"
+            ),
+            patch.object(cli, "load_or_create_token", return_value="token"),
+            patch.object(cli, "create_server", return_value=server),
+            patch.object(cli, "_write_port"),
+            patch.object(cli, "_clear_port", side_effect=OSError("cleanup failed")),
+            patch.object(cli.signal, "signal", return_value=signal.SIG_DFL),
+            self.assertRaisesRegex(OSError, "cleanup failed"),
+        ):
+            cli.serve()
+
+        server.scheduler_runner.stop.assert_called_once_with()
+        server.scheduler_runner.join.assert_called_once_with()
+        server.server_close.assert_called_once_with()
+        store.close.assert_called_once_with()
+
     def test_delete_removes_secret_and_database_record(self) -> None:
         created = self.store.create_credential(
             provider="Example",
