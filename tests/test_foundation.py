@@ -1496,7 +1496,37 @@ class FoundationTests(unittest.TestCase):
             patch.object(cli, "_write_port"),
             patch.object(cli, "_clear_port", side_effect=OSError("cleanup failed")),
             patch.object(cli.signal, "signal", return_value=signal.SIG_DFL),
-            self.assertRaisesRegex(OSError, "cleanup failed"),
+            self.assertLogs("keyguard", level="ERROR") as logs,
+        ):
+            cli.serve()
+
+        self.assertIn("cleanup failed", "\n".join(logs.output))
+        server.scheduler_runner.stop.assert_called_once_with()
+        server.scheduler_runner.join.assert_called_once_with()
+        server.server_close.assert_called_once_with()
+        store.close.assert_called_once_with()
+
+    def test_port_cleanup_failure_does_not_hide_scheduler_startup_failure(
+        self,
+    ) -> None:
+        server = MagicMock()
+        server.server_port = 24567
+        server.scheduler_runner.start.side_effect = RuntimeError("startup failed")
+        store = MagicMock()
+        with (
+            patch.object(cli, "Store", return_value=store),
+            patch.object(cli, "KeyringVault"),
+            patch.object(cli, "database_path", return_value=self.path),
+            patch.object(
+                cli, "auth_token_path", return_value=Path(self.temp.name) / "token"
+            ),
+            patch.object(cli, "load_or_create_token", return_value="token"),
+            patch.object(cli, "create_server", return_value=server),
+            patch.object(cli, "_write_port"),
+            patch.object(cli, "_clear_port", side_effect=OSError("cleanup failed")),
+            patch.object(cli.signal, "signal", return_value=signal.SIG_DFL),
+            self.assertLogs("keyguard", level="ERROR"),
+            self.assertRaisesRegex(RuntimeError, "startup failed"),
         ):
             cli.serve()
 

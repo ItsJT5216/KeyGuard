@@ -125,7 +125,12 @@ def serve() -> None:
                             raise
             finally:
                 try:
-                    _clear_port(server.server_port)
+                    try:
+                        _clear_port(server.server_port)
+                    except OSError:
+                        logging.getLogger("keyguard").exception(
+                            "Failed to clear the daemon discovery port record"
+                        )
                 finally:
                     try:
                         server.server_close()
