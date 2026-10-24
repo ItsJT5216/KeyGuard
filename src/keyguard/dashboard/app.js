@@ -188,6 +188,8 @@ async function runAction(id, action) {
       showMessage(result.snapshot
         ? `Checked: ${number(result.snapshot.used, result.snapshot.unit)} used.`
         : "Check completed.");
+    } else if (result.action === "notify_only") {
+      showMessage("Threshold alert recorded; no provider action was taken.");
     } else {
       showMessage(result.action === "already_disabled"
         ? "The provider key was already disabled."

@@ -143,14 +143,6 @@ class ProtectionService:
         if not force_protect and not credential["auto_protect"]:
             self.store.set_runtime_status(credential_id, "critical")
             return {"snapshot": first.as_dict(), "threshold_crossed": True}
-        if credential["protection_action"] == "notify_only":
-            self.store.set_runtime_status(credential_id, "critical")
-            return {
-                "snapshot": first.as_dict(),
-                "threshold_crossed": True,
-                "action": "notify_only",
-            }
-
         if force_protect:
             verified = first
         else:
@@ -197,6 +189,35 @@ class ProtectionService:
                 "snapshot": verified.as_dict(),
                 "threshold_crossed": True,
                 "action": "already_disabled",
+            }
+        if credential["protection_action"] == "notify_only":
+            self.store.set_runtime_status(credential_id, "critical")
+            event = self.store.record_event(
+                credential_id,
+                "protection_action",
+                "notify_only",
+                {"action": "notify_only", "verified": True},
+            )
+            if self.notifications is not None:
+                message = (
+                    f"{credential['name']} ran its notify-only action after a fresh "
+                    "usage check. No provider action was taken."
+                    if force_protect
+                    else f"{credential['name']} reached its protection threshold "
+                    "after verification. No provider action was taken."
+                )
+                self.notifications.deliver_event(
+                    credential,
+                    event,
+                    message,
+                    priority="high",
+                    tags="warning,shield",
+                )
+            return {
+                "snapshot": verified.as_dict(),
+                "threshold_crossed": True,
+                "verification": "confirmed",
+                "action": "notify_only",
             }
 
         try:
