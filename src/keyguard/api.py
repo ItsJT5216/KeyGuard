@@ -293,7 +293,7 @@ def make_handler(
                 )
             LOGGER.info("%s - %s", self.client_address[0], format_string % safe_args)
 
-        def _security_headers(self, *, api: bool = False) -> None:
+        def _security_headers(self) -> None:
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Referrer-Policy", "no-referrer")
@@ -311,14 +311,14 @@ def make_handler(
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
-            self._security_headers(api=True)
+            self._security_headers()
             self.end_headers()
             self.wfile.write(body)
 
         def _empty(self, status: int = 204) -> None:
             self.send_response(status)
             self.send_header("Content-Length", "0")
-            self._security_headers(api=True)
+            self._security_headers()
             self.end_headers()
 
         def _error(self, error: ApiError) -> None:
