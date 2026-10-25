@@ -647,6 +647,43 @@ class OpenRouterProtectionTests(unittest.TestCase):
             [event["result"] for event in deliveries],
         )
 
+    def test_notify_only_without_delivery_attempt_stays_suppressed(self) -> None:
+        transport = RecordedTransport(
+            [
+                key_payload(usage=5.1),
+                key_payload(usage=5.2),
+                key_payload(usage=5.3),
+                key_payload(usage=5.4),
+            ]
+        )
+        service = ProtectionService(
+            self.store,
+            ProviderRegistry([OpenRouterAdapter(transport)]),
+            NtfyNotifier(self.store),
+        )
+        credential = self.store.create_credential(
+            provider="openrouter",
+            name="Notifications disabled",
+            secret="management-secret",
+            threshold=5.0,
+            auto_protect=True,
+            provider_metadata={"key_hash": "a" * 64},
+            protection_action="notify_only",
+        )
+
+        first = service.check(credential["id"], scheduled=True)
+        repeated = service.check(credential["id"], scheduled=True)
+
+        self.assertEqual("notify_only", first["action"])
+        self.assertEqual("notify_only_already_alerted", repeated["action"])
+        self.assertNotIn(
+            "notification_delivery",
+            [
+                event["event_type"]
+                for event in self.store.history(credential["id"])
+            ],
+        )
+
     def test_manual_notify_only_does_not_suppress_next_threshold_alert(self) -> None:
         transport = RecordedTransport(
             [

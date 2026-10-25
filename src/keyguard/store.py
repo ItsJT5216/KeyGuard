@@ -786,11 +786,17 @@ class Store:
                 """,
                 (credential_id, row["id"]),
             ).fetchall()
+        matching_deliveries = [
+            delivery
+            for delivery in deliveries
+            if json.loads(delivery["details_json"]).get("source_event_id")
+            == row["id"]
+        ]
+        if not matching_deliveries:
+            return True
         return any(
             delivery["result"] == "success"
-            and json.loads(delivery["details_json"]).get("source_event_id")
-            == row["id"]
-            for delivery in deliveries
+            for delivery in matching_deliveries
         )
 
     def _record_event_locked(
