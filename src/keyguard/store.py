@@ -734,6 +734,38 @@ class Store:
             ).fetchone()
         return self._event_public(row) if row else None
 
+    def notify_only_alert_active(
+        self, credential_id: str, threshold: float | None
+    ) -> bool:
+        """Return whether this configured threshold crossing was already alerted."""
+        with self._lock:
+            row = self._db.execute(
+                """
+                SELECT event_type, result, details_json
+                FROM events
+                WHERE credential_id = ?
+                  AND (
+                    (event_type = 'protection_action' AND result = 'notify_only')
+                    OR (event_type = 'usage_checked' AND result = 'success')
+                    OR (
+                        event_type = 'protection_cancelled'
+                        AND result = 'verification_below_threshold'
+                    )
+                  )
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (credential_id,),
+            ).fetchone()
+        if (
+            row is None
+            or row["event_type"] != "protection_action"
+            or row["result"] != "notify_only"
+        ):
+            return False
+        details = json.loads(row["details_json"])
+        return details.get("threshold") == threshold
+
     def _record_event_locked(
         self, credential_id: str, event_type: str, result: str, details: dict[str, Any]
     ) -> int:

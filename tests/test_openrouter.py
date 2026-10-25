@@ -442,6 +442,173 @@ class OpenRouterProtectionTests(unittest.TestCase):
         )
         self.assertEqual(["GET", "GET"], [call[0] for call in transport.calls])
 
+    def test_notify_only_threshold_is_rechecked_and_alerted_without_mutation(
+        self,
+    ) -> None:
+        transport = RecordedTransport(
+            [key_payload(usage=5.1), key_payload(usage=5.2)]
+        )
+        notifications = CapturingNotifications()
+        service = ProtectionService(
+            self.store,
+            ProviderRegistry([OpenRouterAdapter(transport)]),
+            notifications,
+        )
+        credential = self.store.create_credential(
+            provider="openrouter",
+            name="Alert only",
+            secret="management-secret",
+            threshold=5.0,
+            auto_protect=True,
+            provider_metadata={"key_hash": "a" * 64},
+            protection_action="notify_only",
+        )
+
+        outcome = service.check(credential["id"])
+
+        self.assertTrue(outcome["threshold_crossed"])
+        self.assertEqual("confirmed", outcome["verification"])
+        self.assertEqual("notify_only", outcome["action"])
+        self.assertEqual(
+            "critical", self.store.get_credential(credential["id"])["status"]
+        )
+        self.assertEqual(["GET", "GET"], [call[0] for call in transport.calls])
+        self.assertEqual(2, len(self.store.usage_history(credential["id"])))
+        event = self.store.history(credential["id"])[0]
+        self.assertEqual("protection_action", event["event_type"])
+        self.assertEqual("notify_only", event["result"])
+        self.assertEqual(
+            {
+                "action": "notify_only",
+                "verified": True,
+                "threshold": 5.0,
+            },
+            event["details"],
+        )
+        self.assertEqual(
+            "notify_only", notifications.deliveries[0]["event"]["result"]
+        )
+        self.assertIn(
+            "No provider action was taken", notifications.deliveries[0]["message"]
+        )
+
+    def test_notify_only_second_read_below_threshold_cancels_alert(self) -> None:
+        transport = RecordedTransport(
+            [key_payload(usage=5.1), key_payload(usage=4.9)]
+        )
+        notifications = CapturingNotifications()
+        service = ProtectionService(
+            self.store,
+            ProviderRegistry([OpenRouterAdapter(transport)]),
+            notifications,
+        )
+        credential = self.store.create_credential(
+            provider="openrouter",
+            name="Alert only",
+            secret="management-secret",
+            threshold=5.0,
+            auto_protect=True,
+            provider_metadata={"key_hash": "a" * 64},
+            protection_action="notify_only",
+        )
+
+        outcome = service.check(credential["id"])
+
+        self.assertFalse(outcome["threshold_crossed"])
+        self.assertEqual("below_threshold", outcome["verification"])
+        self.assertEqual(["GET", "GET"], [call[0] for call in transport.calls])
+        self.assertEqual([], notifications.deliveries)
+
+    def test_notify_only_threshold_alert_is_suppressed_until_rearmed(self) -> None:
+        transport = RecordedTransport(
+            [
+                key_payload(usage=5.1),
+                key_payload(usage=5.2),
+                key_payload(usage=5.3),
+                key_payload(usage=5.4),
+                key_payload(usage=4.9),
+                key_payload(usage=5.5),
+                key_payload(usage=5.6),
+            ]
+        )
+        notifications = CapturingNotifications()
+        service = ProtectionService(
+            self.store,
+            ProviderRegistry([OpenRouterAdapter(transport)]),
+            notifications,
+        )
+        credential = self.store.create_credential(
+            provider="openrouter",
+            name="Alert only",
+            secret="management-secret",
+            threshold=5.0,
+            auto_protect=True,
+            provider_metadata={"key_hash": "a" * 64},
+            protection_action="notify_only",
+        )
+
+        first = service.check(credential["id"], scheduled=True)
+        repeated = service.check(credential["id"], scheduled=True)
+        below = service.check(credential["id"], scheduled=True)
+        rearmed = service.check(credential["id"], scheduled=True)
+
+        self.assertEqual("notify_only", first["action"])
+        self.assertEqual("notify_only_already_alerted", repeated["action"])
+        self.assertFalse(below["threshold_crossed"])
+        self.assertEqual("notify_only", rearmed["action"])
+        self.assertEqual(2, len(notifications.deliveries))
+        notify_events = [
+            event
+            for event in self.store.history(credential["id"])
+            if event["event_type"] == "protection_action"
+            and event["result"] == "notify_only"
+        ]
+        self.assertEqual(2, len(notify_events))
+
+    def test_notify_only_verification_observes_external_disable(self) -> None:
+        transport = RecordedTransport(
+            [
+                key_payload(usage=5.1),
+                key_payload(usage=5.2, disabled=True),
+            ]
+        )
+        notifications = CapturingNotifications()
+        service = ProtectionService(
+            self.store,
+            ProviderRegistry([OpenRouterAdapter(transport)]),
+            notifications,
+        )
+        credential = self.store.create_credential(
+            provider="openrouter",
+            name="Externally disabled",
+            secret="management-secret",
+            threshold=5.0,
+            auto_protect=True,
+            provider_metadata={"key_hash": "a" * 64},
+            protection_action="notify_only",
+        )
+
+        outcome = service.check(credential["id"], scheduled=True)
+
+        self.assertEqual("already_disabled", outcome["action"])
+        self.assertEqual(
+            "disabled", self.store.get_credential(credential["id"])["status"]
+        )
+        event = self.store.history(credential["id"])[0]
+        self.assertEqual("credential_invalid_or_revoked", event["event_type"])
+        self.assertEqual("disabled_externally", event["result"])
+        self.assertNotIn(
+            "notify_only",
+            [
+                event["result"]
+                for event in self.store.history(credential["id"])
+                if event["event_type"] == "protection_action"
+            ],
+        )
+        self.assertIn(
+            "disabled at the provider", notifications.deliveries[0]["message"]
+        )
+
     def test_verification_read_failure_does_not_claim_action_failure(self) -> None:
         transport = RecordedTransport(
             [
