@@ -741,7 +741,7 @@ class Store:
         with self._lock:
             row = self._db.execute(
                 """
-                SELECT event_type, result, details_json
+                SELECT id, event_type, result, details_json
                 FROM events
                 WHERE credential_id = ?
                   AND (
@@ -764,7 +764,26 @@ class Store:
         ):
             return False
         details = json.loads(row["details_json"])
-        return details.get("threshold") == threshold
+        if details.get("threshold") != threshold:
+            return False
+        with self._lock:
+            deliveries = self._db.execute(
+                """
+                SELECT result, details_json
+                FROM events
+                WHERE credential_id = ?
+                  AND event_type = 'notification_delivery'
+                  AND id > ?
+                ORDER BY id
+                """,
+                (credential_id, row["id"]),
+            ).fetchall()
+        return any(
+            delivery["result"] == "success"
+            and json.loads(delivery["details_json"]).get("source_event_id")
+            == row["id"]
+            for delivery in deliveries
+        )
 
     def _record_event_locked(
         self, credential_id: str, event_type: str, result: str, details: dict[str, Any]
@@ -895,3 +914,4 @@ class Store:
                         self.vault.set(secret_id, previous_token)
                 raise
         return self.get_notification_config()
+
