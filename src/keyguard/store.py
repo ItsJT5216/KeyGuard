@@ -735,9 +735,12 @@ class Store:
         return self._event_public(row) if row else None
 
     def notify_only_alert_active(
-        self, credential_id: str, threshold: float | None
+        self,
+        credential_id: str,
+        threshold: float | None,
+        credential_identity_revision: str,
     ) -> bool:
-        """Return whether this configured threshold crossing was already alerted."""
+        """Return whether this automatic threshold crossing was delivered."""
         with self._lock:
             row = self._db.execute(
                 """
@@ -764,7 +767,12 @@ class Store:
         ):
             return False
         details = json.loads(row["details_json"])
-        if details.get("threshold") != threshold:
+        if (
+            details.get("threshold") != threshold
+            or details.get("trigger") != "automatic_threshold"
+            or details.get("credential_identity_revision")
+            != credential_identity_revision
+        ):
             return False
         with self._lock:
             deliveries = self._db.execute(
