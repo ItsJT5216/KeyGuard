@@ -60,3 +60,32 @@ clearHistoryRefreshError("second", replacementPanel);
 assert.equal(globalMessage.textContent, "");
 assert.equal(globalMessageOwner, null);
 assert.equal(historyRefreshErrors.size, 0);
+
+const runActionSource = source.slice(
+  source.indexOf("async function runAction"),
+  source.indexOf("async function removeCredential"),
+);
+assert.ok(runActionSource, "production runAction function was not found");
+let actionResult = {action: "notify_only", snapshot: {used: 5.2, unit: "USD"}};
+let actionMessage = null;
+const {runAction} = eval(`(() => {
+  const api = async () => actionResult;
+  const showMessage = (value) => { actionMessage = value; };
+  const loadCredentials = async () => {};
+  const number = () => { throw new Error("generic check branch was used"); };
+  ${runActionSource}
+  return {runAction};
+})()`);
+
+await runAction("credential", "check");
+assert.equal(
+  actionMessage,
+  "Notify-only action recorded; no provider action was taken.",
+);
+
+actionResult = {action: "notify_only_already_alerted", snapshot: {used: 5.3}};
+await runAction("credential", "check");
+assert.equal(
+  actionMessage,
+  "Threshold warning was already recorded; no provider action was taken.",
+);

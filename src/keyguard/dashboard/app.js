@@ -184,12 +184,14 @@ async function runAction(id, action) {
       method: "POST",
       body: "{}",
     });
-    if (action === "check") {
+    if (result.action === "notify_only") {
+      showMessage("Notify-only action recorded; no provider action was taken.");
+    } else if (result.action === "notify_only_already_alerted") {
+      showMessage("Threshold warning was already recorded; no provider action was taken.");
+    } else if (action === "check") {
       showMessage(result.snapshot
         ? `Checked: ${number(result.snapshot.used, result.snapshot.unit)} used.`
         : "Check completed.");
-    } else if (result.action === "notify_only") {
-      showMessage("Threshold alert recorded; no provider action was taken.");
     } else {
       showMessage(result.action === "already_disabled"
         ? "The provider key was already disabled."

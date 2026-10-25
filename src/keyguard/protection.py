@@ -41,6 +41,36 @@ class ProtectionService:
         self.store.record_usage_snapshot(credential_id, snapshot.as_dict())
         return snapshot
 
+    def _provider_disabled_outcome(
+        self,
+        credential: dict[str, Any],
+        snapshot: UsageSnapshot,
+        threshold: float | None,
+    ) -> dict[str, Any]:
+        credential_id = credential["id"]
+        self.store.set_runtime_status(credential_id, "disabled")
+        if credential["status"] != "disabled":
+            event = self.store.record_event(
+                credential_id,
+                "credential_invalid_or_revoked",
+                "disabled_externally",
+                {},
+            )
+            if self.notifications is not None:
+                self.notifications.deliver_event(
+                    credential,
+                    event,
+                    f"{credential['name']} is disabled at the provider.",
+                    priority="high",
+                    tags="warning,lock",
+                )
+        return {
+            "snapshot": snapshot.as_dict(),
+            "threshold_crossed": threshold is not None
+            and snapshot.used >= threshold,
+            "action": "already_disabled",
+        }
+
     def check(
         self,
         credential_id: str,
@@ -86,27 +116,7 @@ class ProtectionService:
 
         threshold = credential["threshold"]
         if first.provider_status.get("disabled") is True:
-            self.store.set_runtime_status(credential_id, "disabled")
-            if credential["status"] != "disabled":
-                event = self.store.record_event(
-                    credential_id,
-                    "credential_invalid_or_revoked",
-                    "disabled_externally",
-                    {},
-                )
-                if self.notifications is not None:
-                    self.notifications.deliver_event(
-                        credential,
-                        event,
-                        f"{credential['name']} is disabled at the provider.",
-                        priority="high",
-                        tags="warning,lock",
-                    )
-            return {
-                "snapshot": first.as_dict(),
-                "threshold_crossed": threshold is not None and first.used >= threshold,
-                "action": "already_disabled",
-            }
+            return self._provider_disabled_outcome(credential, first, threshold)
         crossed = threshold is not None and first.used >= threshold
         if not crossed and not force_protect:
             status = (
@@ -156,6 +166,10 @@ class ProtectionService:
                     {"used": first.used, "threshold": threshold, "unit": first.unit},
                 )
                 raise
+            if verified.provider_status.get("disabled") is True:
+                return self._provider_disabled_outcome(
+                    credential, verified, threshold
+                )
             if verified.used < threshold:
                 status = (
                     "disabled"
@@ -192,11 +206,27 @@ class ProtectionService:
             }
         if credential["protection_action"] == "notify_only":
             self.store.set_runtime_status(credential_id, "critical")
+            if (
+                not force_protect
+                and self.store.notify_only_alert_active(
+                    credential_id, threshold
+                )
+            ):
+                return {
+                    "snapshot": verified.as_dict(),
+                    "threshold_crossed": True,
+                    "verification": "confirmed",
+                    "action": "notify_only_already_alerted",
+                }
             event = self.store.record_event(
                 credential_id,
                 "protection_action",
                 "notify_only",
-                {"action": "notify_only", "verified": True},
+                {
+                    "action": "notify_only",
+                    "verified": True,
+                    "threshold": threshold,
+                },
             )
             if self.notifications is not None:
                 message = (
