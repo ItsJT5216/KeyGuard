@@ -735,13 +735,16 @@ class Store:
         return self._event_public(row) if row else None
 
     def notify_only_alert_active(
-        self, credential_id: str, threshold: float | None
+        self,
+        credential_id: str,
+        threshold: float | None,
+        credential_identity_revision: str,
     ) -> bool:
-        """Return whether this configured threshold crossing was already alerted."""
+        """Return whether this automatic threshold crossing was delivered."""
         with self._lock:
             row = self._db.execute(
                 """
-                SELECT event_type, result, details_json
+                SELECT id, event_type, result, details_json
                 FROM events
                 WHERE credential_id = ?
                   AND (
@@ -764,7 +767,44 @@ class Store:
         ):
             return False
         details = json.loads(row["details_json"])
-        return details.get("threshold") == threshold
+        if details.get("threshold") != threshold:
+            return False
+        legacy_event = (
+            details.get("action") == "notify_only"
+            and details.get("verified") is True
+            and "trigger" not in details
+            and "credential_identity_revision" not in details
+        )
+        if not legacy_event and (
+            details.get("trigger") != "automatic_threshold"
+            or details.get("credential_identity_revision")
+            != credential_identity_revision
+        ):
+            return False
+        with self._lock:
+            deliveries = self._db.execute(
+                """
+                SELECT result, details_json
+                FROM events
+                WHERE credential_id = ?
+                  AND event_type = 'notification_delivery'
+                  AND id > ?
+                ORDER BY id
+                """,
+                (credential_id, row["id"]),
+            ).fetchall()
+        matching_deliveries = [
+            delivery
+            for delivery in deliveries
+            if json.loads(delivery["details_json"]).get("source_event_id")
+            == row["id"]
+        ]
+        if not matching_deliveries:
+            return True
+        return any(
+            delivery["result"] == "success"
+            for delivery in matching_deliveries
+        )
 
     def _record_event_locked(
         self, credential_id: str, event_type: str, result: str, details: dict[str, Any]
@@ -895,3 +935,4 @@ class Store:
                         self.vault.set(secret_id, previous_token)
                 raise
         return self.get_notification_config()
+

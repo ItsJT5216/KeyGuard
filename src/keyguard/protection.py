@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -40,6 +42,17 @@ class ProtectionService:
         snapshot = adapter.fetch_usage(secret, metadata)
         self.store.record_usage_snapshot(credential_id, snapshot.as_dict())
         return snapshot
+
+    @staticmethod
+    def _credential_identity_revision(credential: dict[str, Any]) -> str:
+        identity = {
+            "provider": credential["provider"],
+            "provider_metadata": credential["provider_metadata"],
+        }
+        encoded = json.dumps(
+            identity, sort_keys=True, separators=(",", ":")
+        ).encode()
+        return hashlib.sha256(encoded).hexdigest()
 
     def _provider_disabled_outcome(
         self,
@@ -209,7 +222,9 @@ class ProtectionService:
             if (
                 not force_protect
                 and self.store.notify_only_alert_active(
-                    credential_id, threshold
+                    credential_id,
+                    threshold,
+                    self._credential_identity_revision(credential),
                 )
             ):
                 return {
@@ -226,6 +241,12 @@ class ProtectionService:
                     "action": "notify_only",
                     "verified": True,
                     "threshold": threshold,
+                    "trigger": (
+                        "manual" if force_protect else "automatic_threshold"
+                    ),
+                    "credential_identity_revision": (
+                        self._credential_identity_revision(credential)
+                    ),
                 },
             )
             if self.notifications is not None:
@@ -299,4 +320,5 @@ class ProtectionService:
             "threshold_crossed": True,
             "action": result,
         }
+
 
