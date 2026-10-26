@@ -684,6 +684,59 @@ class OpenRouterProtectionTests(unittest.TestCase):
             ],
         )
 
+    def test_legacy_delivered_notify_only_alert_stays_suppressed(self) -> None:
+        transport = RecordedTransport(
+            [
+                key_payload(usage=5.1),
+                key_payload(usage=5.2),
+            ]
+        )
+        notifications = CapturingNotifications(self.store)
+        service = ProtectionService(
+            self.store,
+            ProviderRegistry([OpenRouterAdapter(transport)]),
+            notifications,
+        )
+        credential = self.store.create_credential(
+            provider="openrouter",
+            name="Upgraded alert history",
+            secret="management-secret",
+            threshold=5.0,
+            auto_protect=True,
+            provider_metadata={"key_hash": "a" * 64},
+            protection_action="notify_only",
+        )
+        legacy_event = self.store.record_event(
+            credential["id"],
+            "protection_action",
+            "notify_only",
+            {
+                "action": "notify_only",
+                "verified": True,
+                "threshold": 5.0,
+            },
+        )
+        self.assertIsNotNone(legacy_event)
+        assert legacy_event is not None
+        self.store.record_event(
+            credential["id"],
+            "notification_delivery",
+            "success",
+            {"source_event_id": legacy_event["id"]},
+        )
+
+        outcome = service.check(credential["id"], scheduled=True)
+
+        self.assertEqual("notify_only_already_alerted", outcome["action"])
+        self.assertEqual([], notifications.deliveries)
+        notify_events = [
+            event
+            for event in self.store.history(credential["id"])
+            if event["event_type"] == "protection_action"
+            and event["result"] == "notify_only"
+        ]
+        self.assertEqual(1, len(notify_events))
+
     def test_manual_notify_only_does_not_suppress_next_threshold_alert(self) -> None:
         transport = RecordedTransport(
             [

@@ -767,9 +767,16 @@ class Store:
         ):
             return False
         details = json.loads(row["details_json"])
-        if (
-            details.get("threshold") != threshold
-            or details.get("trigger") != "automatic_threshold"
+        if details.get("threshold") != threshold:
+            return False
+        legacy_event = (
+            details.get("action") == "notify_only"
+            and details.get("verified") is True
+            and "trigger" not in details
+            and "credential_identity_revision" not in details
+        )
+        if not legacy_event and (
+            details.get("trigger") != "automatic_threshold"
             or details.get("credential_identity_revision")
             != credential_identity_revision
         ):
