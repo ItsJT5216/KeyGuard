@@ -737,6 +737,164 @@ class OpenRouterProtectionTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(notify_events))
 
+    def test_legacy_alert_is_invalidated_when_provider_identity_changes(
+        self,
+    ) -> None:
+        transport = RecordedTransport(
+            [
+                key_payload(usage=5.1),
+                key_payload(usage=5.2),
+            ]
+        )
+        notifications = CapturingNotifications(self.store)
+        service = ProtectionService(
+            self.store,
+            ProviderRegistry([OpenRouterAdapter(transport)]),
+            notifications,
+        )
+        credential = self.store.create_credential(
+            provider="openrouter",
+            name="Replace legacy monitored key",
+            secret="management-secret",
+            threshold=5.0,
+            auto_protect=True,
+            provider_metadata={"key_hash": "a" * 64},
+            protection_action="notify_only",
+        )
+        legacy_event = self.store.record_event(
+            credential["id"],
+            "protection_action",
+            "notify_only",
+            {
+                "action": "notify_only",
+                "verified": True,
+                "threshold": 5.0,
+            },
+        )
+        self.assertIsNotNone(legacy_event)
+        assert legacy_event is not None
+        self.store.record_event(
+            credential["id"],
+            "notification_delivery",
+            "success",
+            {"source_event_id": legacy_event["id"]},
+        )
+        self.store.update_credential(
+            credential["id"],
+            {"provider_metadata": {"key_hash": "b" * 64}},
+        )
+
+        outcome = service.check(credential["id"], scheduled=True)
+
+        self.assertEqual("notify_only", outcome["action"])
+        self.assertEqual(1, len(notifications.deliveries))
+
+    def test_unannotated_legacy_update_invalidates_legacy_alert(self) -> None:
+        transport = RecordedTransport(
+            [
+                key_payload(usage=5.1),
+                key_payload(usage=5.2),
+                key_payload(usage=5.3),
+                key_payload(usage=5.4),
+            ]
+        )
+        notifications = CapturingNotifications(self.store)
+        service = ProtectionService(
+            self.store,
+            ProviderRegistry([OpenRouterAdapter(transport)]),
+            notifications,
+        )
+        credential = self.store.create_credential(
+            provider="openrouter",
+            name="Pre-annotation monitored key",
+            secret="management-secret",
+            threshold=5.0,
+            auto_protect=True,
+            provider_metadata={"key_hash": "a" * 64},
+            protection_action="notify_only",
+        )
+        legacy_event = self.store.record_event(
+            credential["id"],
+            "protection_action",
+            "notify_only",
+            {
+                "action": "notify_only",
+                "verified": True,
+                "threshold": 5.0,
+            },
+        )
+        self.assertIsNotNone(legacy_event)
+        assert legacy_event is not None
+        self.store.record_event(
+            credential["id"],
+            "notification_delivery",
+            "success",
+            {"source_event_id": legacy_event["id"]},
+        )
+        self.store.record_event(
+            credential["id"],
+            "credential_updated",
+            "success",
+            {},
+        )
+
+        first = service.check(credential["id"], scheduled=True)
+        repeated = service.check(credential["id"], scheduled=True)
+
+        self.assertEqual("notify_only", first["action"])
+        self.assertEqual("notify_only_already_alerted", repeated["action"])
+        self.assertEqual(1, len(notifications.deliveries))
+
+    def test_legacy_alert_survives_non_identity_credential_edit(self) -> None:
+        transport = RecordedTransport(
+            [
+                key_payload(usage=5.1),
+                key_payload(usage=5.2),
+            ]
+        )
+        notifications = CapturingNotifications(self.store)
+        service = ProtectionService(
+            self.store,
+            ProviderRegistry([OpenRouterAdapter(transport)]),
+            notifications,
+        )
+        credential = self.store.create_credential(
+            provider="openrouter",
+            name="Legacy monitored key",
+            secret="management-secret",
+            threshold=5.0,
+            auto_protect=True,
+            provider_metadata={"key_hash": "a" * 64},
+            protection_action="notify_only",
+        )
+        legacy_event = self.store.record_event(
+            credential["id"],
+            "protection_action",
+            "notify_only",
+            {
+                "action": "notify_only",
+                "verified": True,
+                "threshold": 5.0,
+            },
+        )
+        self.assertIsNotNone(legacy_event)
+        assert legacy_event is not None
+        self.store.record_event(
+            credential["id"],
+            "notification_delivery",
+            "success",
+            {"source_event_id": legacy_event["id"]},
+        )
+        self.store.update_credential(
+            credential["id"],
+            {"name": "Renamed legacy monitored key"},
+        )
+
+        outcome = service.check(credential["id"], scheduled=True)
+
+        self.assertEqual("notify_only_already_alerted", outcome["action"])
+        self.assertEqual([], notifications.deliveries)
+
     def test_manual_notify_only_does_not_suppress_next_threshold_alert(self) -> None:
         transport = RecordedTransport(
             [

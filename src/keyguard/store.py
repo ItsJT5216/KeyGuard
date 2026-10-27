@@ -366,6 +366,13 @@ class Store:
             current = self._public(row)
             secret = values.pop("api_key", None)
             old_secret: str | None = None
+            identity_changed = (
+                values.get("provider", current["provider"]) != current["provider"]
+                or values.get(
+                    "provider_metadata", current["provider_metadata"]
+                )
+                != current["provider_metadata"]
+            )
             if secret is not None:
                 old_secret = self.vault.get(credential_id)
                 self.vault.set(credential_id, secret)
@@ -424,7 +431,10 @@ class Store:
                         ),
                     )
                     self._record_event_locked(
-                        credential_id, "credential_updated", "success", {}
+                        credential_id,
+                        "credential_updated",
+                        "success",
+                        {"credential_identity_changed": identity_changed},
                     )
             except Exception:
                 if secret is not None:
@@ -775,6 +785,27 @@ class Store:
             and "trigger" not in details
             and "credential_identity_revision" not in details
         )
+        if legacy_event:
+            with self._lock:
+                identity_updates = self._db.execute(
+                    """
+                    SELECT details_json
+                    FROM events
+                    WHERE credential_id = ?
+                      AND event_type = 'credential_updated'
+                      AND result = 'success'
+                      AND id > ?
+                    ORDER BY id
+                    """,
+                    (credential_id, row["id"]),
+                ).fetchall()
+            if any(
+                json.loads(update["details_json"]).get(
+                    "credential_identity_changed", True
+                )
+                for update in identity_updates
+            ):
+                return False
         if not legacy_event and (
             details.get("trigger") != "automatic_threshold"
             or details.get("credential_identity_revision")
