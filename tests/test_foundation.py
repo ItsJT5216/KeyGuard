@@ -103,6 +103,51 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual("Primary", reopened["name"])
         self.assertNotIn("api_key", reopened)
 
+    def test_cleanup_required_secret_and_record_are_removed_on_restart(self) -> None:
+        created = self.store.create_credential(
+            provider="Example",
+            name="Interrupted save",
+            secret="orphaned-secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        with self.store._db:
+            self.store._db.execute(
+                "UPDATE credentials SET status = 'cleanup_required' WHERE id = ?",
+                (credential_id,),
+            )
+
+        self.store.close()
+        self.store = Store(self.path, self.vault)
+
+        self.assertIsNone(self.store.get_credential(credential_id))
+        self.assertNotIn(credential_id, self.vault.secrets)
+
+    def test_cleanup_required_record_survives_when_vault_is_unavailable(self) -> None:
+        created = self.store.create_credential(
+            provider="Example",
+            name="Interrupted save",
+            secret="orphaned-secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        with self.store._db:
+            self.store._db.execute(
+                "UPDATE credentials SET status = 'cleanup_required' WHERE id = ?",
+                (credential_id,),
+            )
+
+        self.store.close()
+        unavailable_vault = CleanupFailVault()
+        unavailable_vault.secrets[credential_id] = "orphaned-secret"
+        self.store = Store(self.path, unavailable_vault)
+
+        reopened = self.store.get_credential(credential_id)
+        self.assertEqual("cleanup_required", reopened["status"])
+        self.assertEqual("orphaned-secret", unavailable_vault.secrets[credential_id])
+
     def test_existing_database_defaults_credentials_to_notifications_active(self) -> None:
         created = self.store.create_credential(
             provider="Example",
