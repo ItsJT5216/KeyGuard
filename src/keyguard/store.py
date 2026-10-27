@@ -967,4 +967,3 @@ class Store:
                 raise
         return self.get_notification_config()
 
-
