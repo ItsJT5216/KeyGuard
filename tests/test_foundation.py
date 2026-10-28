@@ -61,6 +61,11 @@ class CleanupFailVault(FakeVault):
         raise RuntimeError("vault cleanup failed")
 
 
+class ReadFailVault(FakeVault):
+    def get(self, credential_id: str) -> str | None:
+        raise RuntimeError("vault read failed")
+
+
 def authorize(server) -> str:
     bootstrap = mint_bootstrap("test-token-that-is-long-enough-123456")
     session = server.authority.exchange_bootstrap(bootstrap)
@@ -147,6 +152,27 @@ class FoundationTests(unittest.TestCase):
         reopened = self.store.get_credential(credential_id)
         self.assertEqual("cleanup_required", reopened["status"])
         self.assertEqual("orphaned-secret", unavailable_vault.secrets[credential_id])
+
+    def test_provisioning_record_survives_when_vault_is_unavailable(self) -> None:
+        created = self.store.create_credential(
+            provider="Example",
+            name="Interrupted provisioning",
+            secret="pending-secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        with self.store._db:
+            self.store._db.execute(
+                "UPDATE credentials SET status = 'provisioning' WHERE id = ?",
+                (credential_id,),
+            )
+
+        self.store.close()
+        self.store = Store(self.path, ReadFailVault())
+
+        reopened = self.store.get_credential(credential_id)
+        self.assertEqual("provisioning", reopened["status"])
 
     def test_existing_database_defaults_credentials_to_notifications_active(self) -> None:
         created = self.store.create_credential(
