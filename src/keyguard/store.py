@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import sqlite3
 import threading
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from .vault import Vault
+
+LOGGER = logging.getLogger("keyguard")
 
 
 def utc_now() -> str:
@@ -211,10 +214,25 @@ class Store:
     def _recover_incomplete_credentials(self) -> None:
         with self._lock:
             rows = self._db.execute(
-                "SELECT id FROM credentials WHERE status = 'provisioning'"
+                "SELECT id, status FROM credentials "
+                "WHERE status IN ('provisioning', 'cleanup_required')"
             ).fetchall()
             for row in rows:
                 credential_id = row["id"]
+                if row["status"] == "cleanup_required":
+                    try:
+                        self.vault.delete(credential_id)
+                    except RuntimeError:
+                        LOGGER.warning(
+                            "Credential cleanup remains pending for %s",
+                            credential_id,
+                        )
+                        continue
+                    with self._db:
+                        self._db.execute(
+                            "DELETE FROM credentials WHERE id = ?", (credential_id,)
+                        )
+                    continue
                 secret = self.vault.get(credential_id)
                 with self._db:
                     if secret is None:
