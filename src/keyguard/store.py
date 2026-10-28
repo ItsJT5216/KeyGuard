@@ -233,7 +233,14 @@ class Store:
                             "DELETE FROM credentials WHERE id = ?", (credential_id,)
                         )
                     continue
-                secret = self.vault.get(credential_id)
+                try:
+                    secret = self.vault.get(credential_id)
+                except RuntimeError:
+                    LOGGER.warning(
+                        "Credential provisioning recovery remains pending for %s",
+                        credential_id,
+                    )
+                    continue
                 with self._db:
                     if secret is None:
                         self._db.execute(
