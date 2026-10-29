@@ -137,10 +137,11 @@ function sortCredentials(left, right) {
 
 function displayStatus(credential) {
   if (credential.status === "provisioning") return {label: "Recovery pending", slug: "pending"};
+  if (credential.status === "cleanup_required") return {label: "Cleanup pending", slug: "pending"};
   if (credential.paused) return {label: "Paused", slug: "paused"};
   if (credential.status === "disabled") return {label: "Disabled", slug: "disabled"};
   const tier = credential.scheduler?.polling_tier || "";
-  if (["error", "cleanup_required", "action_failed"].includes(credential.status)
+  if (["error", "action_failed"].includes(credential.status)
       || tier === "error_retry") {
     return {label: "Error", slug: "error"};
   }
@@ -536,7 +537,7 @@ function card(credential) {
 
   const controls = document.createElement("div");
   controls.className = "controls";
-  const recoveryPending = credential.status === "provisioning";
+  const recoveryPending = ["provisioning", "cleanup_required"].includes(credential.status);
   const check = button("Check now");
   check.disabled = recoveryPending;
   check.addEventListener("click", () => runAction(credential.id, "check"));
