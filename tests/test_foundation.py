@@ -184,19 +184,20 @@ class FoundationTests(unittest.TestCase):
         )
         credential_id = created["id"]
         for status in ("provisioning", "cleanup_required"):
-            with self.subTest(status=status), self.store._db:
-                self.store._db.execute(
-                    "UPDATE credentials SET status = ?, paused = 0 WHERE id = ?",
-                    (status, credential_id),
-                )
+            with self.subTest(status=status):
+                with self.store._db:
+                    self.store._db.execute(
+                        "UPDATE credentials SET status = ?, paused = 0 WHERE id = ?",
+                        (status, credential_id),
+                    )
 
-            for paused in (True, False):
-                with self.assertRaisesRegex(ValueError, "recovery is pending"):
-                    self.store.set_paused(credential_id, paused)
+                for paused in (True, False):
+                    with self.assertRaisesRegex(ValueError, "recovery is pending"):
+                        self.store.set_paused(credential_id, paused)
 
-            pending = self.store.get_credential(credential_id)
-            self.assertEqual(status, pending["status"])
-            self.assertFalse(pending["paused"])
+                pending = self.store.get_credential(credential_id)
+                self.assertEqual(status, pending["status"])
+                self.assertFalse(pending["paused"])
 
     def test_pending_recovery_pause_api_returns_conflict(self) -> None:
         created = self.store.create_credential(
@@ -214,26 +215,27 @@ class FoundationTests(unittest.TestCase):
         thread.start()
         try:
             for status in ("provisioning", "cleanup_required"):
-                with self.subTest(status=status), self.store._db:
-                    self.store._db.execute(
-                        "UPDATE credentials SET status = ?, paused = 0 WHERE id = ?",
-                        (status, credential_id),
+                with self.subTest(status=status):
+                    with self.store._db:
+                        self.store._db.execute(
+                            "UPDATE credentials SET status = ?, paused = 0 WHERE id = ?",
+                            (status, credential_id),
+                        )
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/credentials/{credential_id}/pause",
+                        data=b"{}",
+                        method="POST",
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"KeyGuard-Session {session}",
+                        },
                     )
-                request = urllib.request.Request(
-                    f"http://127.0.0.1:{server.server_port}/api/credentials/{credential_id}/pause",
-                    data=b"{}",
-                    method="POST",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"KeyGuard-Session {session}",
-                    },
-                )
-                with self.assertRaises(urllib.error.HTTPError) as rejected:
-                    urllib.request.urlopen(request)
-                self.assertEqual(409, rejected.exception.code)
-                payload = json.loads(rejected.exception.read())
-                self.assertEqual("RECOVERY_PENDING", payload["error"]["code"])
-                rejected.exception.close()
+                    with self.assertRaises(urllib.error.HTTPError) as rejected:
+                        urllib.request.urlopen(request)
+                    self.assertEqual(409, rejected.exception.code)
+                    payload = json.loads(rejected.exception.read())
+                    self.assertEqual("RECOVERY_PENDING", payload["error"]["code"])
+                    rejected.exception.close()
         finally:
             server.shutdown()
             server.server_close()
