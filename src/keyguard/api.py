@@ -602,7 +602,14 @@ def make_handler(
                     credential_id, action = segments[2], segments[3]
                     if action in {"pause", "resume"}:
                         with protection.credential_operation(credential_id):
-                            result = store.set_paused(credential_id, action == "pause")
+                            try:
+                                result = store.set_paused(
+                                    credential_id, action == "pause"
+                                )
+                            except ValueError as error:
+                                raise ApiError(
+                                    409, "RECOVERY_PENDING", str(error)
+                                ) from error
                             if result is None:
                                 raise ApiError(404, "NOT_FOUND", "Credential not found")
                             if action == "resume":

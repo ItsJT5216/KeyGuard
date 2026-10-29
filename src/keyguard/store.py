@@ -233,7 +233,14 @@ class Store:
                             "DELETE FROM credentials WHERE id = ?", (credential_id,)
                         )
                     continue
-                secret = self.vault.get(credential_id)
+                try:
+                    secret = self.vault.get(credential_id)
+                except RuntimeError:
+                    LOGGER.warning(
+                        "Credential provisioning recovery remains pending for %s",
+                        credential_id,
+                    )
+                    continue
                 with self._db:
                     if secret is None:
                         self._db.execute(
@@ -728,18 +735,26 @@ class Store:
     def set_paused(self, credential_id: str, paused: bool) -> dict[str, Any] | None:
         status = "paused" if paused else "watching"
         with self._lock, self._db:
-            cursor = self._db.execute(
+            existing = self._db.execute(
+                "SELECT status FROM credentials WHERE id = ?", (credential_id,)
+            ).fetchone()
+            if existing is None:
+                return None
+            if existing["status"] == "provisioning":
+                raise ValueError(
+                    "Credential recovery is pending; pause and resume are unavailable"
+                )
+            self._db.execute(
                 "UPDATE credentials SET paused = ?, status = ?, updated_at = ? WHERE id = ?",
                 (int(paused), status, utc_now(), credential_id),
             )
-            if cursor.rowcount:
-                self._record_event_locked(
-                    credential_id,
-                    "monitoring_paused" if paused else "monitoring_resumed",
-                    "success",
-                    {},
-                )
-        return self.get_credential(credential_id) if cursor.rowcount else None
+            self._record_event_locked(
+                credential_id,
+                "monitoring_paused" if paused else "monitoring_resumed",
+                "success",
+                {},
+            )
+        return self.get_credential(credential_id)
 
     def record_event(
         self,

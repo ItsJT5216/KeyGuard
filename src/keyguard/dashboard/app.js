@@ -136,6 +136,7 @@ function sortCredentials(left, right) {
 }
 
 function displayStatus(credential) {
+  if (credential.status === "provisioning") return {label: "Recovery pending", slug: "pending"};
   if (credential.paused) return {label: "Paused", slug: "paused"};
   if (credential.status === "disabled") return {label: "Disabled", slug: "disabled"};
   const tier = credential.scheduler?.polling_tier || "";
@@ -513,7 +514,12 @@ function card(credential) {
       : "Not enough history"),
     metric("Polling", duration(schedule.current_interval_seconds)),
     metric("Last check", when(schedule.last_check_at || usage?.checked_at)),
-    metric("Next check", credential.paused ? "Paused" : when(schedule.next_check_at)),
+    metric(
+      "Next check",
+      credential.status === "provisioning"
+        ? "Recovery pending"
+        : credential.paused ? "Paused" : when(schedule.next_check_at),
+    ),
     metric("Auto Protect", credential.auto_protect ? "On" : "Off"),
     metric("Notifications", credential.notifications_muted ? "Muted" : "Active"),
     metric("Provider action", (credential.protection_action || "notify_only").replaceAll("_", " ")),
@@ -530,9 +536,12 @@ function card(credential) {
 
   const controls = document.createElement("div");
   controls.className = "controls";
+  const recoveryPending = credential.status === "provisioning";
   const check = button("Check now");
+  check.disabled = recoveryPending;
   check.addEventListener("click", () => runAction(credential.id, "check"));
   const pause = button(credential.paused ? "Resume" : "Pause", "secondary");
+  pause.disabled = recoveryPending;
   pause.addEventListener("click", () => setPaused(credential.id, !credential.paused));
   const toggle = button(credential.auto_protect ? "Auto Protect off" : "Auto Protect on", "secondary");
   toggle.addEventListener("click", () => patchCredential(
