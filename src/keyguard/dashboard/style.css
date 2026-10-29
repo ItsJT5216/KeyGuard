@@ -46,6 +46,7 @@ section { border-top: 1px solid var(--line); padding: 28px 0 40px; }
   box-shadow: 0 20px 45px rgba(0, 0, 0, .18);
 }
 .status-disabled, .status-paused { border-top-color: #77727a; }
+.status-pending { border-top-color: #b38a45; }
 .status-error, .status-action_failed { border-top-color: var(--danger); }
 .status-badge {
   align-self: start;
@@ -58,6 +59,7 @@ section { border-top: 1px solid var(--line); padding: 28px 0 40px; }
   text-transform: capitalize;
 }
 .status-healthy .status-badge { border-color: #365a4b; background: #172820; color: #9ee5c1; }
+.status-pending .status-badge { border-color: #705a34; background: #2b2418; color: #e8c98f; }
 .status-critical .status-badge,
 .status-error .status-badge { border-color: #8b3847; background: #35181f; color: #ff9cac; }
 .status-disabled .status-badge,
