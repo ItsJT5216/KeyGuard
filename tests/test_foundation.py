@@ -174,7 +174,7 @@ class FoundationTests(unittest.TestCase):
         reopened = self.store.get_credential(credential_id)
         self.assertEqual("provisioning", reopened["status"])
 
-    def test_pending_provisioning_cannot_be_paused_or_resumed(self) -> None:
+    def test_pending_recovery_cannot_be_paused_or_resumed(self) -> None:
         created = self.store.create_credential(
             provider="Example",
             name="Interrupted provisioning",
@@ -183,21 +183,23 @@ class FoundationTests(unittest.TestCase):
             auto_protect=False,
         )
         credential_id = created["id"]
-        with self.store._db:
-            self.store._db.execute(
-                "UPDATE credentials SET status = 'provisioning' WHERE id = ?",
-                (credential_id,),
-            )
+        for status in ("provisioning", "cleanup_required"):
+            with self.subTest(status=status):
+                with self.store._db:
+                    self.store._db.execute(
+                        "UPDATE credentials SET status = ?, paused = 0 WHERE id = ?",
+                        (status, credential_id),
+                    )
 
-        for paused in (True, False):
-            with self.assertRaisesRegex(ValueError, "recovery is pending"):
-                self.store.set_paused(credential_id, paused)
+                for paused in (True, False):
+                    with self.assertRaisesRegex(ValueError, "recovery is pending"):
+                        self.store.set_paused(credential_id, paused)
 
-        pending = self.store.get_credential(credential_id)
-        self.assertEqual("provisioning", pending["status"])
-        self.assertFalse(pending["paused"])
+                pending = self.store.get_credential(credential_id)
+                self.assertEqual(status, pending["status"])
+                self.assertFalse(pending["paused"])
 
-    def test_pending_provisioning_pause_api_returns_conflict(self) -> None:
+    def test_pending_recovery_pause_api_returns_conflict(self) -> None:
         created = self.store.create_credential(
             provider="Example",
             name="Interrupted provisioning",
@@ -206,45 +208,54 @@ class FoundationTests(unittest.TestCase):
             auto_protect=False,
         )
         credential_id = created["id"]
-        with self.store._db:
-            self.store._db.execute(
-                "UPDATE credentials SET status = 'provisioning' WHERE id = ?",
-                (credential_id,),
-            )
-
         token = "test-token-that-is-long-enough-123456"
         server = create_server(self.store, token, 0)
         session = authorize(server)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            request = urllib.request.Request(
-                f"http://127.0.0.1:{server.server_port}/api/credentials/{credential_id}/pause",
-                data=b"{}",
-                method="POST",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"KeyGuard-Session {session}",
-                },
-            )
-            with self.assertRaises(urllib.error.HTTPError) as rejected:
-                urllib.request.urlopen(request)
-            self.assertEqual(409, rejected.exception.code)
-            payload = json.loads(rejected.exception.read())
-            self.assertEqual("RECOVERY_PENDING", payload["error"]["code"])
-            rejected.exception.close()
+            for status in ("provisioning", "cleanup_required"):
+                with self.subTest(status=status):
+                    with self.store._db:
+                        self.store._db.execute(
+                            "UPDATE credentials SET status = ?, paused = 0 WHERE id = ?",
+                            (status, credential_id),
+                        )
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/credentials/{credential_id}/pause",
+                        data=b"{}",
+                        method="POST",
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"KeyGuard-Session {session}",
+                        },
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as rejected:
+                        urllib.request.urlopen(request)
+                    self.assertEqual(409, rejected.exception.code)
+                    payload = json.loads(rejected.exception.read())
+                    self.assertEqual("RECOVERY_PENDING", payload["error"]["code"])
+                    rejected.exception.close()
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
 
-    def test_pending_provisioning_is_explicit_in_dashboard_assets(self) -> None:
+    def test_pending_recovery_is_explicit_in_dashboard_assets(self) -> None:
         dashboard = Path(__file__).parents[1] / "src" / "keyguard" / "dashboard"
         javascript = dashboard.joinpath("app.js").read_text()
         styles = dashboard.joinpath("style.css").read_text()
 
         self.assertIn(
             'return {label: "Recovery pending", slug: "pending"}',
+            javascript,
+        )
+        self.assertIn(
+            'return {label: "Cleanup pending", slug: "pending"}',
+            javascript,
+        )
+        self.assertIn(
+            '["provisioning", "cleanup_required"].includes(credential.status)',
             javascript,
         )
         self.assertIn("pause.disabled = recoveryPending", javascript)

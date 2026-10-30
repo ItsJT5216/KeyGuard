@@ -740,7 +740,7 @@ class Store:
             ).fetchone()
             if existing is None:
                 return None
-            if existing["status"] == "provisioning":
+            if existing["status"] in {"provisioning", "cleanup_required"}:
                 raise ValueError(
                     "Credential recovery is pending; pause and resume are unavailable"
                 )
