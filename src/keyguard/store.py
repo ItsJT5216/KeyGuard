@@ -389,6 +389,10 @@ class Store:
             if row is None:
                 return None
             current = self._public(row)
+            if current["status"] in {"provisioning", "cleanup_required"}:
+                raise ValueError(
+                    "Credential recovery is pending; settings are unavailable"
+                )
             secret = values.pop("api_key", None)
             old_secret: str | None = None
             identity_changed = (
