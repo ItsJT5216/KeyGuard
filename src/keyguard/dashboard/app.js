@@ -479,6 +479,7 @@ function historyPanel(credential) {
 
 function card(credential) {
   const display = displayStatus(credential);
+  const recoveryPending = ["provisioning", "cleanup_required"].includes(credential.status);
   const article = document.createElement("article");
   article.className = `credential-card status-${display.slug}`;
   article.dataset.credentialId = credential.id;
@@ -517,8 +518,8 @@ function card(credential) {
     metric("Last check", when(schedule.last_check_at || usage?.checked_at)),
     metric(
       "Next check",
-      credential.status === "provisioning"
-        ? "Recovery pending"
+      recoveryPending
+        ? display.label
         : credential.paused ? "Paused" : when(schedule.next_check_at),
     ),
     metric("Auto Protect", credential.auto_protect ? "On" : "Off"),
@@ -537,7 +538,6 @@ function card(credential) {
 
   const controls = document.createElement("div");
   controls.className = "controls";
-  const recoveryPending = ["provisioning", "cleanup_required"].includes(credential.status);
   const check = button("Check now");
   check.disabled = recoveryPending;
   check.addEventListener("click", () => runAction(credential.id, "check"));
@@ -545,21 +545,25 @@ function card(credential) {
   pause.disabled = recoveryPending;
   pause.addEventListener("click", () => setPaused(credential.id, !credential.paused));
   const toggle = button(credential.auto_protect ? "Auto Protect off" : "Auto Protect on", "secondary");
+  toggle.disabled = recoveryPending;
   toggle.addEventListener("click", () => patchCredential(
     credential.id,
     {auto_protect: !credential.auto_protect},
     `Auto Protect turned ${credential.auto_protect ? "off" : "on"}.`,
   ).catch(() => {}));
   const mute = button(credential.notifications_muted ? "Unmute alerts" : "Mute alerts", "secondary");
+  mute.disabled = recoveryPending;
   mute.addEventListener("click", () => patchCredential(
     credential.id,
     {notifications_muted: !credential.notifications_muted},
     "Alerts " + (credential.notifications_muted ? "unmuted" : "muted") + " for " + credential.name + ".",
   ).catch(() => {}));
   const protect = button("Protect now", "danger");
-  protect.disabled = !(credential.available_actions || []).includes(credential.protection_action);
+  protect.disabled = recoveryPending
+    || !(credential.available_actions || []).includes(credential.protection_action);
   protect.addEventListener("click", () => runAction(credential.id, "protect"));
   const edit = button("Edit settings", "secondary");
+  edit.disabled = recoveryPending;
   const editor = editForm(credential);
   edit.addEventListener("click", () => { editor.hidden = !editor.hidden; });
   const remove = button("Remove", "ghost-danger");

@@ -241,6 +241,80 @@ class FoundationTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_pending_recovery_settings_cannot_be_changed(self) -> None:
+        created = self.store.create_credential(
+            provider="Example",
+            name="Interrupted provisioning",
+            secret="secret-value",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        for status in ("provisioning", "cleanup_required"):
+            with self.subTest(status=status):
+                with self.store._db:
+                    self.store._db.execute(
+                        "UPDATE credentials SET status = ? WHERE id = ?",
+                        (status, credential_id),
+                    )
+
+                with self.assertRaisesRegex(ValueError, "recovery is pending"):
+                    self.store.update_credential(
+                        credential_id,
+                        {"name": "Changed during recovery", "auto_protect": True},
+                    )
+
+                pending = self.store.get_credential(credential_id)
+                self.assertEqual(status, pending["status"])
+                self.assertEqual("Interrupted provisioning", pending["name"])
+                self.assertFalse(pending["auto_protect"])
+
+    def test_pending_recovery_settings_api_returns_conflict(self) -> None:
+        created = self.store.create_credential(
+            provider="Example",
+            name="Interrupted provisioning",
+            secret="secret-value",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        token = "test-token-that-is-long-enough-123456"
+        server = create_server(self.store, token, 0)
+        session = authorize(server)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for status in ("provisioning", "cleanup_required"):
+                with self.subTest(status=status):
+                    with self.store._db:
+                        self.store._db.execute(
+                            "UPDATE credentials SET status = ? WHERE id = ?",
+                            (status, credential_id),
+                        )
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/credentials/{credential_id}",
+                        data=json.dumps({"auto_protect": True}).encode(),
+                        method="PATCH",
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"KeyGuard-Session {session}",
+                        },
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as rejected:
+                        urllib.request.urlopen(request)
+                    self.assertEqual(409, rejected.exception.code)
+                    payload = json.loads(rejected.exception.read())
+                    self.assertEqual("RECOVERY_PENDING", payload["error"]["code"])
+                    rejected.exception.close()
+
+                    pending = self.store.get_credential(credential_id)
+                    self.assertEqual(status, pending["status"])
+                    self.assertFalse(pending["auto_protect"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_pending_recovery_is_explicit_in_dashboard_assets(self) -> None:
         dashboard = Path(__file__).parents[1] / "src" / "keyguard" / "dashboard"
         javascript = dashboard.joinpath("app.js").read_text()
@@ -260,6 +334,10 @@ class FoundationTests(unittest.TestCase):
         )
         self.assertIn("pause.disabled = recoveryPending", javascript)
         self.assertIn("check.disabled = recoveryPending", javascript)
+        self.assertIn("toggle.disabled = recoveryPending", javascript)
+        self.assertIn("mute.disabled = recoveryPending", javascript)
+        self.assertIn("protect.disabled = recoveryPending", javascript)
+        self.assertIn("edit.disabled = recoveryPending", javascript)
         self.assertIn(".status-pending", styles)
 
     def test_existing_database_defaults_credentials_to_notifications_active(self) -> None:
@@ -906,7 +984,7 @@ class FoundationTests(unittest.TestCase):
         self.assertNotIn("document.cookie", script)
         self.assertNotIn('setItem("api_key"', script)
         self.assertIn(
-            "protect.disabled = !(credential.available_actions || []).includes(", script
+            "|| !(credential.available_actions || []).includes(", script
         )
         self.assertNotIn('credential.available_actions.join(", ")', script)
         self.assertNotIn("Math.random", script)

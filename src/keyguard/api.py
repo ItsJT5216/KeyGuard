@@ -736,6 +736,12 @@ def make_handler(
                     current = store.get_credential(credential_id)
                     if current is None:
                         raise ApiError(404, "NOT_FOUND", "Credential not found")
+                    if current["status"] in {"provisioning", "cleanup_required"}:
+                        raise ApiError(
+                            409,
+                            "RECOVERY_PENDING",
+                            "Credential recovery is pending; settings are unavailable",
+                        )
                     if "polling" in body:
                         if polling_update is None:
                             values["polling_config"] = normalize_polling_config(None)
