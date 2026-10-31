@@ -484,17 +484,20 @@ class Store:
             ).fetchone()
             if row is None:
                 return False
-            old_secret = self.vault.get(credential_id)
+            with self._db:
+                self._db.execute(
+                    """
+                    UPDATE credentials
+                    SET status = 'cleanup_required', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (utc_now(), credential_id),
+                )
             self.vault.delete(credential_id)
-            try:
-                with self._db:
-                    cursor = self._db.execute(
-                        "DELETE FROM credentials WHERE id = ?", (credential_id,)
-                    )
-            except Exception:
-                if old_secret is not None:
-                    self.vault.set(credential_id, old_secret)
-                raise
+            with self._db:
+                cursor = self._db.execute(
+                    "DELETE FROM credentials WHERE id = ?", (credential_id,)
+                )
             return cursor.rowcount > 0
 
     def get_secret(self, credential_id: str) -> str | None:

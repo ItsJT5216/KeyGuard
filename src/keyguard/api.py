@@ -625,6 +625,10 @@ def make_handler(
                                 scheduler.schedule_outcome(credential_id, outcome)
                         except KeyError:
                             raise ApiError(404, "NOT_FOUND", "Credential not found")
+                        except ValueError as error:
+                            raise ApiError(
+                                409, "RECOVERY_PENDING", str(error)
+                            ) from error
                         self._json(200, outcome)
                         return
                     if action == "protect":
@@ -636,6 +640,10 @@ def make_handler(
                                 scheduler.schedule_outcome(credential_id, outcome)
                         except KeyError:
                             raise ApiError(404, "NOT_FOUND", "Credential not found")
+                        except ValueError as error:
+                            raise ApiError(
+                                409, "RECOVERY_PENDING", str(error)
+                            ) from error
                         self._json(200, outcome)
                         return
                 if segments == ["api", "notifications", "test"]:

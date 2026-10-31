@@ -108,9 +108,14 @@ class ProtectionService:
         credential = self.store.get_credential(credential_id)
         if credential is None:
             raise KeyError(credential_id)
+        if credential["status"] in {"cleanup_required", "provisioning"}:
+            if not scheduled:
+                raise ValueError(
+                    "Credential recovery is pending; check and protect are unavailable"
+                )
+            return {"threshold_crossed": False, "skipped": credential["status"]}
         if scheduled and (
-            credential["paused"]
-            or credential["status"] in {"disabled", "cleanup_required", "provisioning"}
+            credential["paused"] or credential["status"] == "disabled"
         ):
             return {"threshold_crossed": False, "skipped": credential["status"]}
         if force_protect and credential["status"] == "disabled":
