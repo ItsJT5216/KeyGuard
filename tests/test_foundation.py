@@ -66,6 +66,17 @@ class ReadFailVault(FakeVault):
         raise RuntimeError("vault read failed")
 
 
+class DeleteOutageVault(FakeVault):
+    def __init__(self) -> None:
+        super().__init__()
+        self.available = True
+
+    def delete(self, credential_id: str) -> None:
+        if not self.available:
+            raise RuntimeError("vault delete failed")
+        super().delete(credential_id)
+
+
 def authorize(server) -> str:
     bootstrap = mint_bootstrap("test-token-that-is-long-enough-123456")
     session = server.authority.exchange_bootstrap(bootstrap)
@@ -1789,6 +1800,74 @@ class FoundationTests(unittest.TestCase):
         self.assertTrue(self.store.delete_credential(created["id"]))
         self.assertNotIn(created["id"], self.vault.secrets)
         self.assertIsNone(self.store.get_credential(created["id"]))
+
+    def test_delete_outage_tracks_cleanup_and_restart_finishes_removal(self) -> None:
+        self.store.close()
+        vault = DeleteOutageVault()
+        self.store = Store(self.path, vault)
+        created = self.store.create_credential(
+            provider="Example",
+            name="Primary",
+            secret="secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        vault.available = False
+
+        with self.assertRaisesRegex(RuntimeError, "vault delete failed"):
+            self.store.delete_credential(credential_id)
+
+        pending = self.store.get_credential(credential_id)
+        self.assertEqual("cleanup_required", pending["status"])
+        self.assertEqual("secret", vault.secrets[credential_id])
+
+        self.store.close()
+        vault.available = True
+        self.store = Store(self.path, vault)
+        self.assertIsNone(self.store.get_credential(credential_id))
+        self.assertNotIn(credential_id, vault.secrets)
+
+    def test_delete_outage_api_is_explicit_and_leaves_cleanup_pending(self) -> None:
+        self.store.close()
+        vault = DeleteOutageVault()
+        self.store = Store(self.path, vault)
+        created = self.store.create_credential(
+            provider="Example",
+            name="Primary",
+            secret="secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        vault.available = False
+        token = "test-token-that-is-long-enough-123456"
+        server = create_server(self.store, token, 0)
+        session = authorize(server)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/credentials/{credential_id}",
+                method="DELETE",
+                headers={"Authorization": f"KeyGuard-Session {session}"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as rejected:
+                urllib.request.urlopen(request)
+            self.assertEqual(503, rejected.exception.code)
+            payload = json.loads(rejected.exception.read())
+            self.assertEqual(
+                "SECRET_SERVICE_UNAVAILABLE", payload["error"]["code"]
+            )
+            rejected.exception.close()
+
+            pending = self.store.get_credential(credential_id)
+            self.assertEqual("cleanup_required", pending["status"])
+            self.assertEqual("secret", vault.secrets[credential_id])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 if __name__ == "__main__":
