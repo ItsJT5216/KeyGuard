@@ -498,7 +498,11 @@ class FoundationTests(unittest.TestCase):
         with self.assertRaisesRegex(sqlite3.IntegrityError, "simulated update failure"):
             self.store.update_credential(
                 credential_id,
-                {"name": "Rotated", "api_key": "new-secret-9876"},
+                {
+                    "name": "Rotated",
+                    "api_key": "new-secret-9876",
+                    "provider_metadata": {"key_hash": "new-target"},
+                },
             )
 
         recovered = self.store.get_credential(credential_id)
@@ -513,9 +517,10 @@ class FoundationTests(unittest.TestCase):
             def __init__(self) -> None:
                 super().__init__()
                 self.rotated = False
+                self.allow_restore = False
 
             def set(self, credential_id: str, secret: str) -> None:
-                if self.rotated and secret == "old-secret":
+                if self.rotated and secret == "old-secret" and not self.allow_restore:
                     raise RuntimeError("vault rollback failed")
                 super().set(credential_id, secret)
                 if secret == "new-secret-9876":
@@ -558,13 +563,259 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual("••••cret", pending["masked_identifier"])
         self.assertEqual("new-secret-9876", vault.secrets[credential_id])
 
+        vault.allow_restore = True
         self.store.close()
         self.store = Store(self.path, vault)
         recovered = self.store.get_credential(credential_id)
         self.assertEqual("watching", recovered["status"])
         self.assertEqual("Primary", recovered["name"])
-        self.assertEqual("••••9876", recovered["masked_identifier"])
-        self.assertEqual("new-secret-9876", vault.secrets[credential_id])
+        self.assertEqual({}, recovered["provider_metadata"])
+        self.assertEqual("••••cret", recovered["masked_identifier"])
+        self.assertEqual("old-secret", vault.secrets[credential_id])
+
+    def test_committed_rotation_finishes_backup_cleanup_after_restart(self) -> None:
+        class SimulatedCrash(BaseException):
+            pass
+
+        class CleanupCrashVault(FakeVault):
+            crash_cleanup = False
+
+            def delete(self, credential_id: str) -> None:
+                if self.crash_cleanup and ":rotation-backup:" in credential_id:
+                    raise SimulatedCrash
+                super().delete(credential_id)
+
+        vault = CleanupCrashVault()
+        self.store.close()
+        self.store = Store(self.path, vault)
+        created = self.store.create_credential(
+            provider="Example",
+            name="Primary",
+            secret="old-secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        vault.crash_cleanup = True
+
+        with self.assertRaises(SimulatedCrash):
+            self.store.update_credential(
+                credential_id,
+                {
+                    "name": "Rotated",
+                    "api_key": "new-secret",
+                    "provider_metadata": {"target": "new"},
+                },
+            )
+
+        pending = self.store.get_credential(credential_id)
+        self.assertEqual("provisioning", pending["status"])
+        self.assertEqual("Rotated", pending["name"])
+        self.assertEqual("new-secret", vault.secrets[credential_id])
+        self.assertTrue(
+            any(":rotation-backup:" in key for key in vault.secrets)
+        )
+
+        vault.crash_cleanup = False
+        self.store.close()
+        self.store = Store(self.path, vault)
+        recovered = self.store.get_credential(credential_id)
+        self.assertEqual("watching", recovered["status"])
+        self.assertEqual("Rotated", recovered["name"])
+        self.assertEqual({"target": "new"}, recovered["provider_metadata"])
+        self.assertEqual("••••cret", recovered["masked_identifier"])
+        self.assertEqual("new-secret", vault.secrets[credential_id])
+        self.assertFalse(
+            any(":rotation-backup:" in key for key in vault.secrets)
+        )
+
+    def test_interrupted_rotation_restores_disabled_status_and_old_secret(
+        self,
+    ) -> None:
+        class SimulatedCrash(BaseException):
+            pass
+
+        class CrashVault(FakeVault):
+            crash = False
+
+            def set(self, credential_id: str, secret: str) -> None:
+                if (
+                    self.crash
+                    and ":rotation-backup:" not in credential_id
+                    and secret == "new-secret"
+                ):
+                    raise SimulatedCrash
+                super().set(credential_id, secret)
+
+        vault = CrashVault()
+        self.store.close()
+        self.store = Store(self.path, vault)
+        created = self.store.create_credential(
+            provider="Example",
+            name="Primary",
+            secret="old-secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        self.store.set_runtime_status(credential_id, "disabled")
+        vault.crash = True
+
+        with self.assertRaises(SimulatedCrash):
+            self.store.update_credential(
+                credential_id, {"api_key": "new-secret"}
+            )
+
+        self.assertEqual(
+            "provisioning", self.store.get_credential(credential_id)["status"]
+        )
+        vault.crash = False
+        self.store.close()
+        self.store = Store(self.path, vault)
+
+        recovered = self.store.get_credential(credential_id)
+        self.assertEqual("disabled", recovered["status"])
+        self.assertEqual("old-secret", vault.secrets[credential_id])
+        self.assertEqual([], self.store.due_credentials("9999-12-31T23:59:59+00:00"))
+
+    def test_interrupted_repair_keeps_existing_record_and_history(self) -> None:
+        class SimulatedCrash(BaseException):
+            pass
+
+        class CrashVault(FakeVault):
+            crash = False
+
+            def set(self, credential_id: str, secret: str) -> None:
+                if self.crash and ":rotation-backup:" not in credential_id:
+                    raise SimulatedCrash
+                super().set(credential_id, secret)
+
+        vault = CrashVault()
+        self.store.close()
+        self.store = Store(self.path, vault)
+        created = self.store.create_credential(
+            provider="Example",
+            name="Primary",
+            secret="old-secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        vault.secrets.pop(credential_id)
+        history_before = self.store.history(credential_id)
+        vault.crash = True
+
+        with self.assertRaises(SimulatedCrash):
+            self.store.update_credential(
+                credential_id, {"api_key": "replacement-secret"}
+            )
+
+        vault.crash = False
+        self.store.close()
+        self.store = Store(self.path, vault)
+        recovered = self.store.get_credential(credential_id)
+        self.assertIsNotNone(recovered)
+        self.assertEqual("watching", recovered["status"])
+        self.assertEqual("Primary", recovered["name"])
+        self.assertEqual(
+            history_before[0]["event_type"],
+            self.store.history(credential_id)[1]["event_type"],
+        )
+        self.assertNotIn(credential_id, vault.secrets)
+
+    def test_uncertain_vault_write_rolls_back_before_unblocking(self) -> None:
+        class UncertainVault(FakeVault):
+            fail_replacement = False
+
+            def set(self, credential_id: str, secret: str) -> None:
+                super().set(credential_id, secret)
+                if (
+                    self.fail_replacement
+                    and ":rotation-backup:" not in credential_id
+                    and secret == "new-secret"
+                ):
+                    raise RuntimeError("Secret Service response was lost")
+
+        vault = UncertainVault()
+        self.store.close()
+        self.store = Store(self.path, vault)
+        created = self.store.create_credential(
+            provider="Example",
+            name="Primary",
+            secret="old-secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        vault.fail_replacement = True
+
+        with self.assertRaisesRegex(
+            RuntimeError, "Secret Service response was lost"
+        ):
+            self.store.update_credential(
+                credential_id, {"api_key": "new-secret"}
+            )
+
+        restored = self.store.get_credential(credential_id)
+        self.assertEqual("watching", restored["status"])
+        self.assertEqual("••••cret", restored["masked_identifier"])
+        self.assertEqual("old-secret", vault.secrets[credential_id])
+        self.assertIsNone(
+            self.store._db.execute(
+                "SELECT 1 FROM credential_rotation_recovery WHERE credential_id = ?",
+                (credential_id,),
+            ).fetchone()
+        )
+
+    def test_failed_status_restore_stays_pending_until_restart(self) -> None:
+        created = self.store.create_credential(
+            provider="Example",
+            name="Primary",
+            secret="old-secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        with self.store._db:
+            self.store._db.execute(
+                """
+                CREATE TRIGGER reject_rotation_status_restore
+                BEFORE UPDATE OF status ON credentials
+                WHEN OLD.status = 'provisioning' AND NEW.status = 'watching'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated status restore failure');
+                END
+                """
+            )
+            self.store._db.execute(
+                """
+                CREATE TRIGGER reject_rotated_name_again
+                BEFORE UPDATE OF name ON credentials
+                WHEN NEW.name = 'Rotated'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated update failure');
+                END
+                """
+            )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "Credential update failed; recovery remains tracked"
+        ):
+            self.store.update_credential(
+                credential_id,
+                {"name": "Rotated", "api_key": "new-secret"},
+            )
+
+        self.assertEqual(
+            "provisioning", self.store.get_credential(credential_id)["status"]
+        )
+        with self.store._db:
+            self.store._db.execute("DROP TRIGGER reject_rotation_status_restore")
+        self.store.close()
+        self.store = Store(self.path, self.vault)
+        recovered = self.store.get_credential(credential_id)
+        self.assertEqual("watching", recovered["status"])
+        self.assertEqual("old-secret", self.vault.secrets[credential_id])
 
     def test_pause_resume_and_history_are_daemon_state(self) -> None:
         created = self.store.create_credential(
@@ -2049,3 +2300,4 @@ class FoundationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
