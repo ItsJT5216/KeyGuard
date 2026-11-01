@@ -247,9 +247,16 @@ class Store:
                             "DELETE FROM credentials WHERE id = ?", (credential_id,)
                         )
                     else:
+                        masked = (
+                            f"••••{secret[-4:]}" if len(secret) > 4 else "••••"
+                        )
                         self._db.execute(
-                            "UPDATE credentials SET status = 'watching', updated_at = ? WHERE id = ?",
-                            (utc_now(), credential_id),
+                            """
+                            UPDATE credentials
+                            SET status = 'watching', masked_identifier = ?, updated_at = ?
+                            WHERE id = ?
+                            """,
+                            (masked, utc_now(), credential_id),
                         )
                         self._record_event_locked(
                             credential_id, "credential_recovered", "success", {}
@@ -394,6 +401,7 @@ class Store:
                     "Credential recovery is pending; settings are unavailable"
                 )
             secret = values.pop("api_key", None)
+            original_status = current["status"]
             old_secret: str | None = None
             identity_changed = (
                 values.get("provider", current["provider"]) != current["provider"]
@@ -404,7 +412,29 @@ class Store:
             )
             if secret is not None:
                 old_secret = self.vault.get(credential_id)
-                self.vault.set(credential_id, secret)
+                with self._db:
+                    self._db.execute(
+                        """
+                        UPDATE credentials
+                        SET status = 'provisioning', updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (utc_now(), credential_id),
+                    )
+                try:
+                    self.vault.set(credential_id, secret)
+                except Exception:
+                    try:
+                        with self._db:
+                            self._db.execute(
+                                "UPDATE credentials SET status = ?, updated_at = ? WHERE id = ?",
+                                (original_status, utc_now(), credential_id),
+                            )
+                    except Exception as recovery_error:
+                        raise RuntimeError(
+                            "Credential update failed; recovery remains tracked"
+                        ) from recovery_error
+                    raise
                 values["masked_identifier"] = (
                     f"••••{secret[-4:]}" if len(secret) > 4 else "••••"
                 )
@@ -418,7 +448,7 @@ class Store:
                             auto_protect = ?,
                             notifications_muted = ?, provider_metadata_json = ?,
                             protection_action = ?, polling_config_json = ?,
-                            updated_at = ?
+                            status = ?, updated_at = ?
                         WHERE id = ?
                         """,
                         (
@@ -455,6 +485,7 @@ class Store:
                                 values.get("polling_config", current["polling_config"]),
                                 separators=(",", ":"),
                             ),
+                            original_status,
                             utc_now(),
                             credential_id,
                         ),
@@ -467,10 +498,25 @@ class Store:
                     )
             except Exception:
                 if secret is not None:
-                    if old_secret is None:
-                        self.vault.delete(credential_id)
-                    else:
-                        self.vault.set(credential_id, old_secret)
+                    try:
+                        if old_secret is None:
+                            self.vault.delete(credential_id)
+                        else:
+                            self.vault.set(credential_id, old_secret)
+                    except Exception as recovery_error:
+                        raise RuntimeError(
+                            "Credential update failed; recovery remains tracked"
+                        ) from recovery_error
+                    try:
+                        with self._db:
+                            self._db.execute(
+                                "UPDATE credentials SET status = ?, updated_at = ? WHERE id = ?",
+                                (original_status, utc_now(), credential_id),
+                            )
+                    except Exception as recovery_error:
+                        raise RuntimeError(
+                            "Credential update failed; recovery remains tracked"
+                        ) from recovery_error
                 raise
             updated = self._db.execute(
                 "SELECT * FROM credentials WHERE id = ?", (credential_id,)

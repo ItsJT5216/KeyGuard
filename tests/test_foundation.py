@@ -474,6 +474,98 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual("new-secret-9876", self.vault.secrets[created["id"]])
         self.assertNotIn(b"new-secret-9876", self.path.read_bytes())
 
+    def test_failed_secret_rotation_restores_vault_and_daemon_state(self) -> None:
+        created = self.store.create_credential(
+            provider="Example",
+            name="Primary",
+            secret="old-secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        with self.store._db:
+            self.store._db.execute(
+                """
+                CREATE TRIGGER reject_rotated_name
+                BEFORE UPDATE OF name ON credentials
+                WHEN NEW.name = 'Rotated'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated update failure');
+                END
+                """
+            )
+
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "simulated update failure"):
+            self.store.update_credential(
+                credential_id,
+                {"name": "Rotated", "api_key": "new-secret-9876"},
+            )
+
+        recovered = self.store.get_credential(credential_id)
+        self.assertEqual("Primary", recovered["name"])
+        self.assertEqual("watching", recovered["status"])
+        self.assertEqual("••••cret", recovered["masked_identifier"])
+        self.assertEqual("old-secret", self.vault.secrets[credential_id])
+        self.assertNotIn(b"new-secret-9876", self.path.read_bytes())
+
+    def test_failed_secret_rotation_tracks_unrestored_vault_for_restart(self) -> None:
+        class RestoreFailVault(FakeVault):
+            def __init__(self) -> None:
+                super().__init__()
+                self.rotated = False
+
+            def set(self, credential_id: str, secret: str) -> None:
+                if self.rotated and secret == "old-secret":
+                    raise RuntimeError("vault rollback failed")
+                super().set(credential_id, secret)
+                if secret == "new-secret-9876":
+                    self.rotated = True
+
+        vault = RestoreFailVault()
+        self.store.close()
+        self.store = Store(self.path, vault)
+        created = self.store.create_credential(
+            provider="Example",
+            name="Primary",
+            secret="old-secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        with self.store._db:
+            self.store._db.execute(
+                """
+                CREATE TRIGGER reject_rotated_name
+                BEFORE UPDATE OF name ON credentials
+                WHEN NEW.name = 'Rotated'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated update failure');
+                END
+                """
+            )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "Credential update failed; recovery remains tracked"
+        ):
+            self.store.update_credential(
+                credential_id,
+                {"name": "Rotated", "api_key": "new-secret-9876"},
+            )
+
+        pending = self.store.get_credential(credential_id)
+        self.assertEqual("provisioning", pending["status"])
+        self.assertEqual("Primary", pending["name"])
+        self.assertEqual("••••cret", pending["masked_identifier"])
+        self.assertEqual("new-secret-9876", vault.secrets[credential_id])
+
+        self.store.close()
+        self.store = Store(self.path, vault)
+        recovered = self.store.get_credential(credential_id)
+        self.assertEqual("watching", recovered["status"])
+        self.assertEqual("Primary", recovered["name"])
+        self.assertEqual("••••9876", recovered["masked_identifier"])
+        self.assertEqual("new-secret-9876", vault.secrets[credential_id])
+
     def test_pause_resume_and_history_are_daemon_state(self) -> None:
         created = self.store.create_credential(
             provider="Example",
