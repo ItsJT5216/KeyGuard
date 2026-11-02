@@ -240,7 +240,7 @@ class Store:
                 credential_id = row["id"]
                 if row["status"] == "cleanup_required":
                     try:
-                        self.vault.delete(credential_id)
+                        self._delete_credential_secrets_locked(row)
                     except RuntimeError:
                         LOGGER.warning(
                             "Credential cleanup remains pending for %s",
@@ -258,7 +258,7 @@ class Store:
                             self._finish_committed_rotation_locked(row)
                         else:
                             self._rollback_rotation_locked(row)
-                    except RuntimeError:
+                    except (RuntimeError, sqlite3.Error):
                         LOGGER.warning(
                             "Credential rotation recovery remains pending for %s",
                             credential_id,
@@ -335,6 +335,10 @@ class Store:
     def _delete_rotation_backup_locked(self, recovery: sqlite3.Row) -> None:
         if recovery["had_previous_secret"]:
             self.vault.delete(recovery["backup_credential_id"])
+
+    def _delete_credential_secrets_locked(self, recovery: sqlite3.Row) -> None:
+        self.vault.delete(recovery["id"])
+        self._delete_rotation_backup_locked(recovery)
 
     def _finish_committed_rotation_locked(self, recovery: sqlite3.Row) -> None:
         self._delete_rotation_backup_locked(recovery)
@@ -628,6 +632,13 @@ class Store:
                         """,
                         (credential_id,),
                     )
+                    if secret is None:
+                        self._record_event_locked(
+                            credential_id,
+                            "credential_updated",
+                            "success",
+                            {"credential_identity_changed": identity_changed},
+                        )
             except Exception:
                 if secret is not None:
                     try:
@@ -648,14 +659,6 @@ class Store:
                     raise RuntimeError(
                         "Credential update committed; recovery cleanup remains tracked"
                     ) from recovery_error
-            else:
-                with self._db:
-                    self._record_event_locked(
-                        credential_id,
-                        "credential_updated",
-                        "success",
-                        {"credential_identity_changed": identity_changed},
-                    )
             updated = self._db.execute(
                 "SELECT * FROM credentials WHERE id = ?", (credential_id,)
             ).fetchone()
@@ -664,7 +667,14 @@ class Store:
     def delete_credential(self, credential_id: str) -> bool:
         with self._lock:
             row = self._db.execute(
-                "SELECT id FROM credentials WHERE id = ?", (credential_id,)
+                """
+                SELECT c.id, r.backup_credential_id, r.had_previous_secret
+                FROM credentials AS c
+                LEFT JOIN credential_rotation_recovery AS r
+                    ON r.credential_id = c.id
+                WHERE c.id = ?
+                """,
+                (credential_id,),
             ).fetchone()
             if row is None:
                 return False
@@ -677,7 +687,7 @@ class Store:
                     """,
                     (utc_now(), credential_id),
                 )
-            self.vault.delete(credential_id)
+            self._delete_credential_secrets_locked(row)
             with self._db:
                 cursor = self._db.execute(
                     "DELETE FROM credentials WHERE id = ?", (credential_id,)

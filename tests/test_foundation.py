@@ -809,6 +809,11 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(
             "provisioning", self.store.get_credential(credential_id)["status"]
         )
+        self.store.close()
+        self.store = Store(self.path, self.vault)
+        self.assertEqual(
+            "provisioning", self.store.get_credential(credential_id)["status"]
+        )
         with self.store._db:
             self.store._db.execute("DROP TRIGGER reject_rotation_status_restore")
         self.store.close()
@@ -816,6 +821,33 @@ class FoundationTests(unittest.TestCase):
         recovered = self.store.get_credential(credential_id)
         self.assertEqual("watching", recovered["status"])
         self.assertEqual("old-secret", self.vault.secrets[credential_id])
+
+    def test_non_secret_update_and_audit_event_are_atomic(self) -> None:
+        created = self.store.create_credential(
+            provider="Example",
+            name="Primary",
+            secret="secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        with self.store._db:
+            self.store._db.execute(
+                """
+                CREATE TRIGGER reject_credential_updated_event
+                BEFORE INSERT ON events
+                WHEN NEW.event_type = 'credential_updated'
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated audit failure');
+                END
+                """
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.update_credential(credential_id, {"name": "Changed"})
+
+        unchanged = self.store.get_credential(credential_id)
+        self.assertEqual("Primary", unchanged["name"])
 
     def test_pause_resume_and_history_are_daemon_state(self) -> None:
         created = self.store.create_credential(
@@ -2194,6 +2226,66 @@ class FoundationTests(unittest.TestCase):
         self.assertTrue(self.store.delete_credential(created["id"]))
         self.assertNotIn(created["id"], self.vault.secrets)
         self.assertIsNone(self.store.get_credential(created["id"]))
+
+    def test_delete_recovery_pending_tracks_backup_until_cleanup(self) -> None:
+        class SimulatedCrash(BaseException):
+            pass
+
+        class CrashVault(FakeVault):
+            crash = False
+            fail_backup_delete = False
+
+            def set(self, credential_id: str, secret: str) -> None:
+                if (
+                    self.crash
+                    and ":rotation-backup:" not in credential_id
+                    and secret == "new-secret"
+                ):
+                    raise SimulatedCrash
+                super().set(credential_id, secret)
+
+            def delete(self, credential_id: str) -> None:
+                if self.fail_backup_delete and ":rotation-backup:" in credential_id:
+                    raise RuntimeError("backup delete failed")
+                super().delete(credential_id)
+
+        vault = CrashVault()
+        self.store.close()
+        self.store = Store(self.path, vault)
+        created = self.store.create_credential(
+            provider="Example",
+            name="Primary",
+            secret="old-secret",
+            threshold=None,
+            auto_protect=False,
+        )
+        credential_id = created["id"]
+        vault.crash = True
+
+        with self.assertRaises(SimulatedCrash):
+            self.store.update_credential(
+                credential_id, {"api_key": "new-secret"}
+            )
+
+        backup_id = next(
+            key for key in vault.secrets if ":rotation-backup:" in key
+        )
+        vault.crash = False
+        vault.fail_backup_delete = True
+        with self.assertRaisesRegex(RuntimeError, "backup delete failed"):
+            self.store.delete_credential(credential_id)
+
+        pending = self.store.get_credential(credential_id)
+        self.assertEqual("cleanup_required", pending["status"])
+        self.assertNotIn(credential_id, vault.secrets)
+        self.assertIn(backup_id, vault.secrets)
+
+        self.store.close()
+        vault.fail_backup_delete = False
+        self.store = Store(self.path, vault)
+        self.assertIsNone(self.store.get_credential(credential_id))
+        self.assertNotIn(credential_id, vault.secrets)
+        self.assertNotIn(backup_id, vault.secrets)
 
     def test_delete_outage_tracks_cleanup_and_restart_finishes_removal(self) -> None:
         self.store.close()
