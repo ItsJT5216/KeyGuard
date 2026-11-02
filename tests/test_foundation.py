@@ -628,6 +628,9 @@ class FoundationTests(unittest.TestCase):
         self.assertFalse(
             any(":rotation-backup:" in key for key in vault.secrets)
         )
+        scheduler_state = self.store.get_scheduler_state(credential_id)
+        self.assertEqual("due", scheduler_state["polling_tier"])
+        self.assertEqual(0, scheduler_state["current_interval_seconds"])
 
     def test_interrupted_rotation_restores_disabled_status_and_old_secret(
         self,

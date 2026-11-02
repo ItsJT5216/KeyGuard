@@ -342,6 +342,7 @@ class Store:
 
     def _finish_committed_rotation_locked(self, recovery: sqlite3.Row) -> None:
         self._delete_rotation_backup_locked(recovery)
+        self.schedule_now(recovery["id"])
         self._complete_rotation_recovery_locked(recovery, "credential_updated")
 
     def _rollback_rotation_locked(self, recovery: sqlite3.Row) -> None:
