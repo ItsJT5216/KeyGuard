@@ -458,6 +458,17 @@ class Store:
             except Exception:
                 with self._db:
                     self._db.execute(
+                        "UPDATE credentials SET status = 'cleanup_required', updated_at = ? WHERE id = ?",
+                        (utc_now(), credential_id),
+                    )
+                try:
+                    self.vault.delete(credential_id)
+                except Exception as cleanup_error:
+                    raise RuntimeError(
+                        "Credential creation failed; cleanup remains tracked"
+                    ) from cleanup_error
+                with self._db:
+                    self._db.execute(
                         "DELETE FROM credentials WHERE id = ?", (credential_id,)
                     )
                 raise
