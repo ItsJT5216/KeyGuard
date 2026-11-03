@@ -66,6 +66,21 @@ class ReadFailVault(FakeVault):
         raise RuntimeError("vault read failed")
 
 
+class AmbiguousWriteVault(FakeVault):
+    def __init__(self, *, cleanup_available: bool) -> None:
+        super().__init__()
+        self.cleanup_available = cleanup_available
+
+    def set(self, credential_id: str, secret: str) -> None:
+        super().set(credential_id, secret)
+        raise RuntimeError("vault write outcome is unknown")
+
+    def delete(self, credential_id: str) -> None:
+        if not self.cleanup_available:
+            raise RuntimeError("vault cleanup failed")
+        super().delete(credential_id)
+
+
 class DeleteOutageVault(FakeVault):
     def __init__(self) -> None:
         super().__init__()
@@ -118,6 +133,61 @@ class FoundationTests(unittest.TestCase):
         reopened = self.store.get_credential(credential_id)
         self.assertEqual("Primary", reopened["name"])
         self.assertNotIn("api_key", reopened)
+
+    def test_failed_vault_write_cleans_possible_secret_before_dropping_record(
+        self,
+    ) -> None:
+        self.store.close()
+        ambiguous_vault = AmbiguousWriteVault(cleanup_available=True)
+        self.store = Store(self.path, ambiguous_vault)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "vault write outcome is unknown"
+        ):
+            self.store.create_credential(
+                provider="Example",
+                name="Ambiguous write",
+                secret="possibly-stored-secret",
+                threshold=None,
+                auto_protect=False,
+            )
+
+        self.assertEqual([], self.store.list_credentials())
+        self.assertEqual({}, ambiguous_vault.secrets)
+
+    def test_failed_vault_write_tracks_cleanup_until_secret_service_recovers(
+        self,
+    ) -> None:
+        self.store.close()
+        ambiguous_vault = AmbiguousWriteVault(cleanup_available=False)
+        self.store = Store(self.path, ambiguous_vault)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "cleanup remains tracked"
+        ):
+            self.store.create_credential(
+                provider="Example",
+                name="Ambiguous write",
+                secret="possibly-stored-secret",
+                threshold=None,
+                auto_protect=False,
+            )
+
+        pending = self.store.list_credentials()
+        self.assertEqual(1, len(pending))
+        credential_id = pending[0]["id"]
+        self.assertEqual("cleanup_required", pending[0]["status"])
+        self.assertEqual(
+            "possibly-stored-secret", ambiguous_vault.secrets[credential_id]
+        )
+        self.assertNotIn(b"possibly-stored-secret", self.path.read_bytes())
+
+        ambiguous_vault.cleanup_available = True
+        self.store.close()
+        self.store = Store(self.path, ambiguous_vault)
+
+        self.assertEqual([], self.store.list_credentials())
+        self.assertEqual({}, ambiguous_vault.secrets)
 
     def test_cleanup_required_secret_and_record_are_removed_on_restart(self) -> None:
         created = self.store.create_credential(
