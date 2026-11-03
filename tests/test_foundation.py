@@ -81,6 +81,21 @@ class AmbiguousWriteVault(FakeVault):
         super().delete(credential_id)
 
 
+class SimulatedProcessInterruption(BaseException):
+    pass
+
+
+class InterruptedDeleteVault(AmbiguousWriteVault):
+    def __init__(self) -> None:
+        super().__init__(cleanup_available=True)
+        self.interrupt_cleanup = True
+
+    def delete(self, credential_id: str) -> None:
+        if self.interrupt_cleanup:
+            raise SimulatedProcessInterruption("process stopped during cleanup")
+        super().delete(credential_id)
+
+
 class DeleteOutageVault(FakeVault):
     def __init__(self) -> None:
         super().__init__()
@@ -109,6 +124,12 @@ class FoundationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.store.close()
         self.temp.cleanup()
+
+    def assert_secret_absent_from_sqlite(self, secret: str) -> None:
+        secret_bytes = secret.encode()
+        for path in (self.path, Path(f"{self.path}-wal")):
+            if path.exists():
+                self.assertNotIn(secret_bytes, path.read_bytes(), str(path))
 
     def test_secret_lives_only_in_vault_and_public_record_survives_restart(
         self,
@@ -180,7 +201,7 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(
             "possibly-stored-secret", ambiguous_vault.secrets[credential_id]
         )
-        self.assertNotIn(b"possibly-stored-secret", self.path.read_bytes())
+        self.assert_secret_absent_from_sqlite("possibly-stored-secret")
 
         ambiguous_vault.cleanup_available = True
         self.store.close()
@@ -188,6 +209,36 @@ class FoundationTests(unittest.TestCase):
 
         self.assertEqual([], self.store.list_credentials())
         self.assertEqual({}, ambiguous_vault.secrets)
+
+    def test_interrupted_ambiguous_write_cleanup_recovers_on_restart(self) -> None:
+        self.store.close()
+        interrupted_vault = InterruptedDeleteVault()
+        self.store = Store(self.path, interrupted_vault)
+
+        with self.assertRaises(SimulatedProcessInterruption):
+            self.store.create_credential(
+                provider="Example",
+                name="Interrupted ambiguous write",
+                secret="possibly-stored-secret",
+                threshold=None,
+                auto_protect=False,
+            )
+
+        pending = self.store.list_credentials()
+        self.assertEqual(1, len(pending))
+        credential_id = pending[0]["id"]
+        self.assertEqual("cleanup_required", pending[0]["status"])
+        self.assertEqual(
+            "possibly-stored-secret", interrupted_vault.secrets[credential_id]
+        )
+        self.assert_secret_absent_from_sqlite("possibly-stored-secret")
+
+        interrupted_vault.interrupt_cleanup = False
+        self.store.close()
+        self.store = Store(self.path, interrupted_vault)
+
+        self.assertEqual([], self.store.list_credentials())
+        self.assertEqual({}, interrupted_vault.secrets)
 
     def test_cleanup_required_secret_and_record_are_removed_on_restart(self) -> None:
         created = self.store.create_credential(
