@@ -96,6 +96,17 @@ class InterruptedDeleteVault(AmbiguousWriteVault):
         super().delete(credential_id)
 
 
+class InterruptedCleanupVault(FakeVault):
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupt_cleanup = True
+
+    def delete(self, credential_id: str) -> None:
+        if self.interrupt_cleanup:
+            raise SimulatedProcessInterruption("process stopped during cleanup")
+        super().delete(credential_id)
+
+
 class DeleteOutageVault(FakeVault):
     def __init__(self) -> None:
         super().__init__()
@@ -2029,6 +2040,41 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(1, len(records))
         self.assertEqual("cleanup_required", records[0]["status"])
         self.assertIn(records[0]["id"], vault.secrets)
+
+    def test_interrupted_finalization_cleanup_recovers_on_restart(self) -> None:
+        self.store.close()
+        vault = InterruptedCleanupVault()
+        self.store = Store(self.path, vault)
+
+        with (
+            patch.object(
+                self.store,
+                "_record_event_locked",
+                side_effect=RuntimeError("event write failed"),
+            ),
+            self.assertRaises(SimulatedProcessInterruption),
+        ):
+            self.store.create_credential(
+                provider="Example",
+                name="Interrupted finalization",
+                secret="possibly-stored-secret",
+                threshold=None,
+                auto_protect=False,
+            )
+
+        pending = self.store.list_credentials()
+        self.assertEqual(1, len(pending))
+        credential_id = pending[0]["id"]
+        self.assertEqual("cleanup_required", pending[0]["status"])
+        self.assertEqual("possibly-stored-secret", vault.secrets[credential_id])
+        self.assert_secret_absent_from_sqlite("possibly-stored-secret")
+
+        vault.interrupt_cleanup = False
+        self.store.close()
+        self.store = Store(self.path, vault)
+
+        self.assertEqual([], self.store.list_credentials())
+        self.assertEqual({}, vault.secrets)
 
     def test_installer_generates_user_service_and_desktop_launcher(self) -> None:
         service_dir = Path(self.temp.name) / "systemd" / "user"
