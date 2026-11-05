@@ -265,33 +265,17 @@ class Store:
                         )
                     continue
                 try:
-                    secret = self.vault.get(credential_id)
+                    self._delete_credential_secrets_locked(row)
                 except RuntimeError:
                     LOGGER.warning(
-                        "Credential provisioning recovery remains pending for %s",
+                        "Credential provisioning cleanup remains pending for %s",
                         credential_id,
                     )
                     continue
                 with self._db:
-                    if secret is None:
-                        self._db.execute(
-                            "DELETE FROM credentials WHERE id = ?", (credential_id,)
-                        )
-                    else:
-                        masked = (
-                            f"••••{secret[-4:]}" if len(secret) > 4 else "••••"
-                        )
-                        self._db.execute(
-                            """
-                            UPDATE credentials
-                            SET status = 'watching', masked_identifier = ?, updated_at = ?
-                            WHERE id = ?
-                            """,
-                            (masked, utc_now(), credential_id),
-                        )
-                        self._record_event_locked(
-                            credential_id, "credential_recovered", "success", {}
-                        )
+                    self._db.execute(
+                        "DELETE FROM credentials WHERE id = ?", (credential_id,)
+                    )
 
     def _rotation_recovery_row_locked(
         self, credential_id: str
