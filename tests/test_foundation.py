@@ -96,6 +96,17 @@ class InterruptedDeleteVault(AmbiguousWriteVault):
         super().delete(credential_id)
 
 
+class InterruptedCleanupVault(FakeVault):
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupt_cleanup = True
+
+    def delete(self, credential_id: str) -> None:
+        if self.interrupt_cleanup:
+            raise SimulatedProcessInterruption("process stopped during cleanup")
+        super().delete(credential_id)
+
+
 class DeleteOutageVault(FakeVault):
     def __init__(self) -> None:
         super().__init__()
@@ -172,6 +183,82 @@ class FoundationTests(unittest.TestCase):
                 threshold=None,
                 auto_protect=False,
             )
+
+        self.assertEqual([], self.store.list_credentials())
+        self.assertEqual({}, ambiguous_vault.secrets)
+
+    def test_failed_vault_write_still_cleans_when_marker_write_fails(self) -> None:
+        self.store.close()
+        ambiguous_vault = AmbiguousWriteVault(cleanup_available=True)
+        self.store = Store(self.path, ambiguous_vault)
+        with self.store._db:
+            self.store._db.execute(
+                """
+                CREATE TRIGGER reject_create_cleanup_marker
+                BEFORE UPDATE OF status ON credentials
+                WHEN NEW.status = 'cleanup_required'
+                BEGIN
+                    SELECT RAISE(ABORT, 'cleanup marker unavailable');
+                END
+                """
+            )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "vault write outcome is unknown"
+        ):
+            self.store.create_credential(
+                provider="Example",
+                name="Ambiguous write",
+                secret="possibly-stored-secret",
+                threshold=None,
+                auto_protect=False,
+            )
+
+        self.assertEqual([], self.store.list_credentials())
+        self.assertEqual({}, ambiguous_vault.secrets)
+        self.assert_secret_absent_from_sqlite("possibly-stored-secret")
+
+    def test_failed_vault_write_double_failure_stays_fail_closed_on_restart(
+        self,
+    ) -> None:
+        self.store.close()
+        ambiguous_vault = AmbiguousWriteVault(cleanup_available=False)
+        self.store = Store(self.path, ambiguous_vault)
+        with self.store._db:
+            self.store._db.execute(
+                """
+                CREATE TRIGGER reject_create_cleanup_marker
+                BEFORE UPDATE OF status ON credentials
+                WHEN NEW.status = 'cleanup_required'
+                BEGIN
+                    SELECT RAISE(ABORT, 'cleanup marker unavailable');
+                END
+                """
+            )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "cleanup could not be tracked"
+        ):
+            self.store.create_credential(
+                provider="Example",
+                name="Double failure",
+                secret="possibly-stored-secret",
+                threshold=None,
+                auto_protect=False,
+            )
+
+        pending = self.store.list_credentials()
+        self.assertEqual(1, len(pending))
+        credential_id = pending[0]["id"]
+        self.assertEqual("provisioning", pending[0]["status"])
+        self.assertEqual(
+            "possibly-stored-secret", ambiguous_vault.secrets[credential_id]
+        )
+        self.assert_secret_absent_from_sqlite("possibly-stored-secret")
+
+        ambiguous_vault.cleanup_available = True
+        self.store.close()
+        self.store = Store(self.path, ambiguous_vault)
 
         self.assertEqual([], self.store.list_credentials())
         self.assertEqual({}, ambiguous_vault.secrets)
@@ -301,7 +388,7 @@ class FoundationTests(unittest.TestCase):
             )
 
         self.store.close()
-        self.store = Store(self.path, ReadFailVault())
+        self.store = Store(self.path, CleanupFailVault())
 
         reopened = self.store.get_credential(credential_id)
         self.assertEqual("provisioning", reopened["status"])
@@ -2029,6 +2116,74 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(1, len(records))
         self.assertEqual("cleanup_required", records[0]["status"])
         self.assertIn(records[0]["id"], vault.secrets)
+
+    def test_interrupted_finalization_cleanup_recovers_on_restart(self) -> None:
+        self.store.close()
+        vault = InterruptedCleanupVault()
+        self.store = Store(self.path, vault)
+
+        with (
+            patch.object(
+                self.store,
+                "_record_event_locked",
+                side_effect=RuntimeError("event write failed"),
+            ),
+            self.assertRaises(SimulatedProcessInterruption),
+        ):
+            self.store.create_credential(
+                provider="Example",
+                name="Interrupted finalization",
+                secret="possibly-stored-secret",
+                threshold=None,
+                auto_protect=False,
+            )
+
+        pending = self.store.list_credentials()
+        self.assertEqual(1, len(pending))
+        credential_id = pending[0]["id"]
+        self.assertEqual("cleanup_required", pending[0]["status"])
+        self.assertEqual("possibly-stored-secret", vault.secrets[credential_id])
+        self.assert_secret_absent_from_sqlite("possibly-stored-secret")
+
+        vault.interrupt_cleanup = False
+        self.store.close()
+        self.store = Store(self.path, vault)
+
+        self.assertEqual([], self.store.list_credentials())
+        self.assertEqual({}, vault.secrets)
+
+    def test_failed_finalization_still_cleans_when_marker_write_fails(self) -> None:
+        with self.store._db:
+            self.store._db.execute(
+                """
+                CREATE TRIGGER reject_finalization_cleanup_marker
+                BEFORE UPDATE OF status ON credentials
+                WHEN NEW.status = 'cleanup_required'
+                BEGIN
+                    SELECT RAISE(ABORT, 'cleanup marker unavailable');
+                END
+                """
+            )
+
+        with (
+            patch.object(
+                self.store,
+                "_record_event_locked",
+                side_effect=RuntimeError("event write failed"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "event write failed"),
+        ):
+            self.store.create_credential(
+                provider="Example",
+                name="Failed finalization",
+                secret="possibly-stored-secret",
+                threshold=None,
+                auto_protect=False,
+            )
+
+        self.assertEqual([], self.store.list_credentials())
+        self.assertEqual({}, self.vault.secrets)
+        self.assert_secret_absent_from_sqlite("possibly-stored-secret")
 
     def test_installer_generates_user_service_and_desktop_launcher(self) -> None:
         service_dir = Path(self.temp.name) / "systemd" / "user"

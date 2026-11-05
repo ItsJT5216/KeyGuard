@@ -265,33 +265,17 @@ class Store:
                         )
                     continue
                 try:
-                    secret = self.vault.get(credential_id)
+                    self._delete_credential_secrets_locked(row)
                 except RuntimeError:
                     LOGGER.warning(
-                        "Credential provisioning recovery remains pending for %s",
+                        "Credential provisioning cleanup remains pending for %s",
                         credential_id,
                     )
                     continue
                 with self._db:
-                    if secret is None:
-                        self._db.execute(
-                            "DELETE FROM credentials WHERE id = ?", (credential_id,)
-                        )
-                    else:
-                        masked = (
-                            f"••••{secret[-4:]}" if len(secret) > 4 else "••••"
-                        )
-                        self._db.execute(
-                            """
-                            UPDATE credentials
-                            SET status = 'watching', masked_identifier = ?, updated_at = ?
-                            WHERE id = ?
-                            """,
-                            (masked, utc_now(), credential_id),
-                        )
-                        self._record_event_locked(
-                            credential_id, "credential_recovered", "success", {}
-                        )
+                    self._db.execute(
+                        "DELETE FROM credentials WHERE id = ?", (credential_id,)
+                    )
 
     def _rotation_recovery_row_locked(
         self, credential_id: str
@@ -406,6 +390,43 @@ class Store:
             ).fetchone()
         return self._public(row) if row else None
 
+    def _cleanup_failed_create_locked(self, credential_id: str) -> None:
+        def track_cleanup() -> bool:
+            try:
+                with self._db:
+                    self._db.execute(
+                        "UPDATE credentials SET status = 'cleanup_required', updated_at = ? WHERE id = ?",
+                        (utc_now(), credential_id),
+                    )
+            except sqlite3.Error:
+                return False
+            return True
+
+        cleanup_tracked = track_cleanup()
+        try:
+            self.vault.delete(credential_id)
+        except Exception as cleanup_error:
+            if not cleanup_tracked:
+                cleanup_tracked = track_cleanup()
+            if cleanup_tracked:
+                raise RuntimeError(
+                    "Credential creation failed; cleanup remains tracked"
+                ) from cleanup_error
+            raise RuntimeError(
+                "Credential creation failed; cleanup could not be tracked"
+            ) from cleanup_error
+        try:
+            with self._db:
+                self._db.execute(
+                    "DELETE FROM credentials WHERE id = ?", (credential_id,)
+                )
+        except sqlite3.Error:
+            # The secret is gone. A remaining provisioning or cleanup marker is
+            # fail-closed and startup recovery removes it once SQLite recovers.
+            LOGGER.warning(
+                "Credential record cleanup remains pending for %s", credential_id
+            )
+
     def create_credential(
         self,
         *,
@@ -456,21 +477,7 @@ class Store:
             try:
                 self.vault.set(credential_id, secret)
             except Exception:
-                with self._db:
-                    self._db.execute(
-                        "UPDATE credentials SET status = 'cleanup_required', updated_at = ? WHERE id = ?",
-                        (utc_now(), credential_id),
-                    )
-                try:
-                    self.vault.delete(credential_id)
-                except Exception as cleanup_error:
-                    raise RuntimeError(
-                        "Credential creation failed; cleanup remains tracked"
-                    ) from cleanup_error
-                with self._db:
-                    self._db.execute(
-                        "DELETE FROM credentials WHERE id = ?", (credential_id,)
-                    )
+                self._cleanup_failed_create_locked(credential_id)
                 raise
             try:
                 with self._db:
@@ -482,21 +489,7 @@ class Store:
                         credential_id, "credential_added", "success", {}
                     )
             except Exception:
-                try:
-                    self.vault.delete(credential_id)
-                except Exception as cleanup_error:
-                    with self._db:
-                        self._db.execute(
-                            "UPDATE credentials SET status = 'cleanup_required', updated_at = ? WHERE id = ?",
-                            (utc_now(), credential_id),
-                        )
-                    raise RuntimeError(
-                        "Credential creation failed; cleanup remains tracked"
-                    ) from cleanup_error
-                with self._db:
-                    self._db.execute(
-                        "DELETE FROM credentials WHERE id = ?", (credential_id,)
-                    )
+                self._cleanup_failed_create_locked(credential_id)
                 raise
             row = self._db.execute(
                 "SELECT * FROM credentials WHERE id = ?", (credential_id,)
