@@ -151,6 +151,44 @@ class AllowanceTests(unittest.TestCase):
         self.assertIsNone(payload["credential"]["starting_allowance"])
         self.assertEqual([], self.adapter.calls)
 
+    def test_secret_named_metadata_is_rejected_before_persistence(self) -> None:
+        leaked_secret = "must-never-reach-sqlite-or-dashboard"
+
+        status, payload = self.request(
+            "POST",
+            "/api/credentials",
+            self.create_payload(
+                metadata={
+                    "scope": "one-key",
+                    "nested": [{"api-key": leaked_secret}],
+                }
+            ),
+        )
+
+        self.assertEqual(422, status)
+        self.assertEqual("VALIDATION_ERROR", payload["error"]["code"])
+        self.assertEqual([], self.store.list_credentials())
+        self.assertEqual({}, self.vault.secrets)
+        self.assertNotIn(leaked_secret.encode(), self.path.read_bytes())
+
+        status, payload = self.request(
+            "POST", "/api/credentials", self.create_payload()
+        )
+        self.assertEqual(201, status)
+        credential_id = payload["credential"]["id"]
+
+        status, payload = self.request(
+            "PATCH",
+            f"/api/credentials/{credential_id}",
+            {"metadata": {"nested": {"client_secret": leaked_secret}}},
+        )
+
+        self.assertEqual(422, status)
+        self.assertEqual("VALIDATION_ERROR", payload["error"]["code"])
+        persisted = self.store.get_credential(credential_id)
+        self.assertEqual({"scope": "one-key"}, persisted["provider_metadata"])
+        self.assertNotIn(leaked_secret.encode(), self.path.read_bytes())
+
     def test_excessive_create_is_rejected_not_saved_and_notified(self) -> None:
         self.store.update_notification_config({"enabled": True})
         self.server.notifications.send = Mock()

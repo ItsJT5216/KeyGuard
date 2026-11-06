@@ -129,6 +129,41 @@ def _boolean(value: Any, field: str, default: bool = False) -> bool:
     return value
 
 
+_SECRET_METADATA_FIELDS = frozenset(
+    {
+        "accesstoken",
+        "apikey",
+        "apisecret",
+        "authorization",
+        "authtoken",
+        "bearertoken",
+        "clientsecret",
+        "credential",
+        "managementkey",
+        "password",
+        "privatekey",
+        "secret",
+        "secretkey",
+        "token",
+    }
+)
+
+
+def _has_secret_metadata_field(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = "".join(
+                character for character in key.lower() if character.isalnum()
+            )
+            if normalized in _SECRET_METADATA_FIELDS or _has_secret_metadata_field(
+                nested
+            ):
+                return True
+    elif isinstance(value, list):
+        return any(_has_secret_metadata_field(item) for item in value)
+    return False
+
+
 def _metadata(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
@@ -136,6 +171,12 @@ def _metadata(value: Any) -> dict[str, Any]:
         raise ApiError(422, "VALIDATION_ERROR", "metadata must be a small object")
     if any(not isinstance(key, str) for key in value):
         raise ApiError(422, "VALIDATION_ERROR", "metadata keys must be text")
+    if _has_secret_metadata_field(value):
+        raise ApiError(
+            422,
+            "VALIDATION_ERROR",
+            "metadata must not contain secrets; use api_key",
+        )
     return value
 
 
