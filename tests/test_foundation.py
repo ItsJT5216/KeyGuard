@@ -393,6 +393,49 @@ class FoundationTests(unittest.TestCase):
         reopened = self.store.get_credential(credential_id)
         self.assertEqual("provisioning", reopened["status"])
 
+    def test_startup_cleanup_sqlite_failure_keeps_recovery_pending(self) -> None:
+        for status in ("provisioning", "cleanup_required"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / "state.db"
+                vault = FakeVault()
+                store = Store(path, vault)
+                created = store.create_credential(
+                    provider="Example",
+                    name="Interrupted cleanup",
+                    secret="pending-secret",
+                    threshold=None,
+                    auto_protect=False,
+                )
+                credential_id = created["id"]
+                with store._db:
+                    store._db.execute(
+                        "UPDATE credentials SET status = ? WHERE id = ?",
+                        (status, credential_id),
+                    )
+                    store._db.execute(
+                        """
+                        CREATE TRIGGER reject_startup_record_cleanup
+                        BEFORE DELETE ON credentials
+                        BEGIN
+                            SELECT RAISE(ABORT, 'record cleanup unavailable');
+                        END
+                        """
+                    )
+                store.close()
+
+                store = Store(path, vault)
+                pending = store.get_credential(credential_id)
+                self.assertIsNotNone(pending)
+                self.assertEqual(status, pending["status"])
+                self.assertNotIn(credential_id, vault.secrets)
+
+                with store._db:
+                    store._db.execute("DROP TRIGGER reject_startup_record_cleanup")
+                store.close()
+                store = Store(path, vault)
+                self.assertIsNone(store.get_credential(credential_id))
+                store.close()
+
     def test_pending_recovery_cannot_be_paused_or_resumed(self) -> None:
         created = self.store.create_credential(
             provider="Example",

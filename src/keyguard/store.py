@@ -247,10 +247,7 @@ class Store:
                             credential_id,
                         )
                         continue
-                    with self._db:
-                        self._db.execute(
-                            "DELETE FROM credentials WHERE id = ?", (credential_id,)
-                        )
+                    self._delete_recovered_credential_record_locked(credential_id)
                     continue
                 if row["previous_status"] is not None:
                     try:
@@ -272,10 +269,23 @@ class Store:
                         credential_id,
                     )
                     continue
-                with self._db:
-                    self._db.execute(
-                        "DELETE FROM credentials WHERE id = ?", (credential_id,)
-                    )
+                self._delete_recovered_credential_record_locked(credential_id)
+
+    def _delete_recovered_credential_record_locked(
+        self, credential_id: str
+    ) -> None:
+        try:
+            with self._db:
+                self._db.execute(
+                    "DELETE FROM credentials WHERE id = ?", (credential_id,)
+                )
+        except sqlite3.Error:
+            # The vault secret is already gone. Keep the non-secret recovery
+            # marker so a later daemon start can finish removing the record.
+            LOGGER.warning(
+                "Credential record cleanup remains pending for %s",
+                credential_id,
+            )
 
     def _rotation_recovery_row_locked(
         self, credential_id: str
