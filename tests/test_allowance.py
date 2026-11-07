@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import Mock
 
-from keyguard.api import create_server
+from keyguard.api import ApiError, _metadata, create_server
 from keyguard.auth import mint_bootstrap
 from keyguard.notifications import NotificationError
 from keyguard.providers import ProviderRegistry
@@ -150,6 +150,82 @@ class AllowanceTests(unittest.TestCase):
         self.assertEqual(201, status)
         self.assertIsNone(payload["credential"]["starting_allowance"])
         self.assertEqual([], self.adapter.calls)
+
+    def test_secret_named_metadata_is_rejected_before_persistence(self) -> None:
+        leaked_secret = "must-never-reach-sqlite-or-dashboard"
+
+        for field in (
+            "api-key",
+            "api_token",
+            "refresh_token",
+            "session_token",
+            "openaiApiKey",
+            "github_token",
+            "oauth_refresh_token",
+        ):
+            with self.subTest(field=field):
+                status, payload = self.request(
+                    "POST",
+                    "/api/credentials",
+                    self.create_payload(
+                        metadata={
+                            "scope": "one-key",
+                            "nested": [{field: leaked_secret}],
+                        }
+                    ),
+                )
+                self.assertEqual(422, status)
+                self.assertEqual("VALIDATION_ERROR", payload["error"]["code"])
+                self.assertEqual([], self.store.list_credentials())
+                self.assertEqual({}, self.vault.secrets)
+        self.assertEqual([], self.store.list_credentials())
+        self.assertEqual({}, self.vault.secrets)
+        self.assertNotIn(leaked_secret.encode(), self.path.read_bytes())
+
+        status, payload = self.request(
+            "POST", "/api/credentials", self.create_payload()
+        )
+        self.assertEqual(201, status)
+        credential_id = payload["credential"]["id"]
+
+        status, payload = self.request(
+            "PATCH",
+            f"/api/credentials/{credential_id}",
+            {"metadata": {"nested": {"client_secret": leaked_secret}}},
+        )
+
+        self.assertEqual(422, status)
+        self.assertEqual("VALIDATION_ERROR", payload["error"]["code"])
+        persisted = self.store.get_credential(credential_id)
+        self.assertEqual({"scope": "one-key"}, persisted["provider_metadata"])
+        self.assertNotIn(leaked_secret.encode(), self.path.read_bytes())
+
+    def test_non_secret_identifiers_and_hashes_remain_valid_metadata(self) -> None:
+        metadata = {
+            "key_hash": "sha256-value",
+            "management_key_hash": "provider-fingerprint",
+            "credential_id": "provider-credential-id",
+            "account_id": "account-id",
+        }
+
+        status, payload = self.request(
+            "POST", "/api/credentials", self.create_payload(metadata=metadata)
+        )
+
+        self.assertEqual(201, status)
+        self.assertEqual(metadata, payload["credential"]["provider_metadata"])
+
+    def test_deeply_nested_secret_metadata_is_a_validation_error(self) -> None:
+        nested: object = {"api_token": "must-not-persist"}
+        for _ in range(1_200):
+            nested = [nested]
+
+        with self.assertRaises(ApiError) as rejected:
+            _metadata({"nested": nested})
+
+        self.assertEqual(422, rejected.exception.status)
+        self.assertEqual("VALIDATION_ERROR", rejected.exception.code)
+        self.assertIn("must not contain secrets", rejected.exception.message)
 
     def test_excessive_create_is_rejected_not_saved_and_notified(self) -> None:
         self.store.update_notification_config({"enabled": True})

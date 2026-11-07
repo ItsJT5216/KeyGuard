@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -129,13 +130,102 @@ def _boolean(value: Any, field: str, default: bool = False) -> bool:
     return value
 
 
+_SECRET_METADATA_FIELDS = frozenset(
+    {
+        "accesstoken",
+        "apikey",
+        "apisecret",
+        "authorization",
+        "authtoken",
+        "bearertoken",
+        "clientsecret",
+        "credential",
+        "managementkey",
+        "password",
+        "privatekey",
+        "secret",
+        "secretkey",
+        "token",
+    }
+)
+_SECRET_METADATA_COMPONENTS = frozenset(
+    {"authorization", "bearer", "password", "passphrase", "secret", "token"}
+)
+_SECRET_METADATA_PAIRS = frozenset(
+    {
+        ("access", "key"),
+        ("api", "key"),
+        ("api", "secret"),
+        ("client", "secret"),
+        ("management", "key"),
+        ("private", "key"),
+        ("secret", "key"),
+    }
+)
+_SAFE_METADATA_SUFFIXES = frozenset(
+    {"fingerprint", "hash", "hint", "id", "identifier", "last4", "prefix", "suffix"}
+)
+
+
+def _is_secret_metadata_field(key: str) -> bool:
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    components = tuple(
+        component.casefold()
+        for component in re.split(r"[^0-9A-Za-z]+", separated)
+        if component
+    )
+    if not components:
+        return False
+    if components[-1] in _SAFE_METADATA_SUFFIXES:
+        return False
+    if any(component in _SECRET_METADATA_COMPONENTS for component in components):
+        return True
+    if any(
+        pair in _SECRET_METADATA_PAIRS
+        for pair in zip(components, components[1:], strict=False)
+    ):
+        return True
+    normalized = "".join(
+        character for character in key.casefold() if character.isalnum()
+    )
+    return any(normalized.endswith(field) for field in _SECRET_METADATA_FIELDS)
+
+
+def _has_secret_metadata_field(value: Any) -> bool:
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, dict):
+            for key, nested in current.items():
+                if not isinstance(key, str):
+                    raise ApiError(
+                        422, "VALIDATION_ERROR", "metadata keys must be text"
+                    )
+                if _is_secret_metadata_field(key):
+                    return True
+                pending.append(nested)
+        elif isinstance(current, list):
+            pending.extend(current)
+    return False
+
+
 def _metadata(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
-    if not isinstance(value, dict) or len(json.dumps(value)) > 4096:
+    try:
+        serialized = json.dumps(value)
+    except (RecursionError, TypeError, ValueError) as error:
+        raise ApiError(
+            422, "VALIDATION_ERROR", "metadata must be a small object"
+        ) from error
+    if not isinstance(value, dict) or len(serialized) > 4096:
         raise ApiError(422, "VALIDATION_ERROR", "metadata must be a small object")
-    if any(not isinstance(key, str) for key in value):
-        raise ApiError(422, "VALIDATION_ERROR", "metadata keys must be text")
+    if _has_secret_metadata_field(value):
+        raise ApiError(
+            422,
+            "VALIDATION_ERROR",
+            "metadata must not contain secrets; use api_key",
+        )
     return value
 
 
