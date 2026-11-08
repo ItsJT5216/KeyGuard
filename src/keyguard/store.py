@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .metadata import scrub_secret_metadata_fields
 from .vault import Vault
 
 LOGGER = logging.getLogger("keyguard")
@@ -34,6 +35,7 @@ class Store:
         self._lock = threading.RLock()
         self.vault = vault
         self._migrate()
+        self._scrub_legacy_provider_metadata()
         self._recover_incomplete_credentials()
         try:
             self.path.chmod(0o600)
@@ -224,6 +226,36 @@ class Store:
                 (default_topic, utc_now()),
             )
 
+    def _scrub_legacy_provider_metadata(self) -> None:
+        self._db.execute("PRAGMA secure_delete=ON")
+        rows = self._db.execute(
+            "SELECT id, provider_metadata_json FROM credentials"
+        ).fetchall()
+        scrubbed_ids: list[str] = []
+        with self._db:
+            for row in rows:
+                metadata = json.loads(row["provider_metadata_json"])
+                cleaned, changed = scrub_secret_metadata_fields(metadata)
+                if not changed:
+                    continue
+                self._db.execute(
+                    "UPDATE credentials SET provider_metadata_json = ? WHERE id = ?",
+                    (json.dumps(cleaned, separators=(",", ":")), row["id"]),
+                )
+                scrubbed_ids.append(row["id"])
+        if not scrubbed_ids:
+            return
+
+        # Rebuild the database and truncate its WAL so rejected legacy secret
+        # values are removed from SQLite storage, not merely hidden from GETs.
+        self._db.execute("VACUUM")
+        self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        for credential_id in scrubbed_ids:
+            LOGGER.warning(
+                "Removed secret-bearing legacy provider metadata for %s",
+                credential_id,
+            )
+
     def _recover_incomplete_credentials(self) -> None:
         with self._lock:
             rows = self._db.execute(
@@ -247,10 +279,7 @@ class Store:
                             credential_id,
                         )
                         continue
-                    with self._db:
-                        self._db.execute(
-                            "DELETE FROM credentials WHERE id = ?", (credential_id,)
-                        )
+                    self._delete_recovered_credential_record_locked(credential_id)
                     continue
                 if row["previous_status"] is not None:
                     try:
@@ -272,10 +301,23 @@ class Store:
                         credential_id,
                     )
                     continue
-                with self._db:
-                    self._db.execute(
-                        "DELETE FROM credentials WHERE id = ?", (credential_id,)
-                    )
+                self._delete_recovered_credential_record_locked(credential_id)
+
+    def _delete_recovered_credential_record_locked(
+        self, credential_id: str
+    ) -> None:
+        try:
+            with self._db:
+                self._db.execute(
+                    "DELETE FROM credentials WHERE id = ?", (credential_id,)
+                )
+        except sqlite3.Error:
+            # The vault secret is already gone. Keep the non-secret recovery
+            # marker so a later daemon start can finish removing the record.
+            LOGGER.warning(
+                "Credential record cleanup remains pending for %s",
+                credential_id,
+            )
 
     def _rotation_recovery_row_locked(
         self, credential_id: str
@@ -1205,5 +1247,3 @@ class Store:
                         self.vault.set(secret_id, previous_token)
                 raise
         return self.get_notification_config()
-
-
