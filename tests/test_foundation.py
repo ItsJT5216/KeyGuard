@@ -166,6 +166,98 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual("Primary", reopened["name"])
         self.assertNotIn("api_key", reopened)
 
+    def test_startup_scrubs_secret_bearing_legacy_provider_metadata(self) -> None:
+        secret_values = (
+            "legacy-service-secret",
+            "legacy-access-secret",
+            "legacy-passphrase-secret",
+        )
+        created = self.store.create_credential(
+            provider="Example",
+            name="Legacy metadata",
+            secret="vault-only-secret",
+            threshold=None,
+            auto_protect=False,
+            provider_metadata={"key_hash": "safe-fingerprint"},
+        )
+        credential_id = created["id"]
+        legacy_metadata = {
+            "key_hash": "safe-fingerprint",
+            "nested": [
+                {"service_credentials": secret_values[0]},
+                {"ACCESSKEY": secret_values[1]},
+                {"passPhrase": secret_values[2]},
+                {"credential_id": "safe-provider-id"},
+            ],
+        }
+        with self.store._db:
+            self.store._db.execute(
+                "UPDATE credentials SET provider_metadata_json = ? WHERE id = ?",
+                (json.dumps(legacy_metadata), credential_id),
+            )
+
+        self.store.close()
+        self.store = Store(self.path, self.vault)
+
+        reopened = self.store.get_credential(credential_id)
+        self.assertEqual(
+            {
+                "key_hash": "safe-fingerprint",
+                "nested": [{}, {}, {}, {"credential_id": "safe-provider-id"}],
+            },
+            reopened["provider_metadata"],
+        )
+        for secret in secret_values:
+            self.assert_secret_absent_from_sqlite(secret)
+
+    def test_startup_retries_interrupted_legacy_metadata_compaction(self) -> None:
+        legacy_secret = "legacy-crash-window-secret"
+        created = self.store.create_credential(
+            provider="Example",
+            name="Interrupted scrub",
+            secret="vault-only-secret",
+            threshold=None,
+            auto_protect=False,
+            provider_metadata={"key_hash": "safe-fingerprint"},
+        )
+        credential_id = created["id"]
+        self.store._db.execute("PRAGMA secure_delete=OFF")
+        with self.store._db:
+            self.store._db.execute(
+                "UPDATE credentials SET provider_metadata_json = ? WHERE id = ?",
+                (json.dumps({"api_key": legacy_secret}), credential_id),
+            )
+            self.store._db.execute(
+                "INSERT INTO maintenance_state (key, value) VALUES (?, ?)",
+                ("provider_metadata_scrub_pending", "interrupted"),
+            )
+        with self.store._db:
+            self.store._db.execute(
+                "UPDATE credentials SET provider_metadata_json = ? WHERE id = ?",
+                (json.dumps({"key_hash": "safe-fingerprint"}), credential_id),
+            )
+        sqlite_paths = (self.path, Path(f"{self.path}-wal"))
+        self.assertTrue(
+            any(
+                path.exists() and legacy_secret.encode() in path.read_bytes()
+                for path in sqlite_paths
+            )
+        )
+
+        self.store.close()
+        self.store = Store(self.path, self.vault)
+
+        marker = self.store._db.execute(
+            "SELECT 1 FROM maintenance_state WHERE key = ?",
+            ("provider_metadata_scrub_pending",),
+        ).fetchone()
+        self.assertIsNone(marker)
+        self.assertEqual(
+            {"key_hash": "safe-fingerprint"},
+            self.store.get_credential(credential_id)["provider_metadata"],
+        )
+        self.assert_secret_absent_from_sqlite(legacy_secret)
+
     def test_failed_vault_write_cleans_possible_secret_before_dropping_record(
         self,
     ) -> None:
@@ -392,6 +484,49 @@ class FoundationTests(unittest.TestCase):
 
         reopened = self.store.get_credential(credential_id)
         self.assertEqual("provisioning", reopened["status"])
+
+    def test_startup_cleanup_sqlite_failure_keeps_recovery_pending(self) -> None:
+        for status in ("provisioning", "cleanup_required"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / "state.db"
+                vault = FakeVault()
+                store = Store(path, vault)
+                created = store.create_credential(
+                    provider="Example",
+                    name="Interrupted cleanup",
+                    secret="pending-secret",
+                    threshold=None,
+                    auto_protect=False,
+                )
+                credential_id = created["id"]
+                with store._db:
+                    store._db.execute(
+                        "UPDATE credentials SET status = ? WHERE id = ?",
+                        (status, credential_id),
+                    )
+                    store._db.execute(
+                        """
+                        CREATE TRIGGER reject_startup_record_cleanup
+                        BEFORE DELETE ON credentials
+                        BEGIN
+                            SELECT RAISE(ABORT, 'record cleanup unavailable');
+                        END
+                        """
+                    )
+                store.close()
+
+                store = Store(path, vault)
+                pending = store.get_credential(credential_id)
+                self.assertIsNotNone(pending)
+                self.assertEqual(status, pending["status"])
+                self.assertNotIn(credential_id, vault.secrets)
+
+                with store._db:
+                    store._db.execute("DROP TRIGGER reject_startup_record_cleanup")
+                store.close()
+                store = Store(path, vault)
+                self.assertIsNone(store.get_credential(credential_id))
+                store.close()
 
     def test_pending_recovery_cannot_be_paused_or_resumed(self) -> None:
         created = self.store.create_credential(
@@ -2671,4 +2806,3 @@ class FoundationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

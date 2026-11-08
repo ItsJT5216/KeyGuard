@@ -162,6 +162,10 @@ class AllowanceTests(unittest.TestCase):
             "openaiApiKey",
             "github_token",
             "oauth_refresh_token",
+            "service_credentials",
+            "ACCESSKEY",
+            "pass-phrase",
+            "passPhrase",
         ):
             with self.subTest(field=field):
                 status, payload = self.request(
@@ -205,6 +209,9 @@ class AllowanceTests(unittest.TestCase):
             "key_hash": "sha256-value",
             "management_key_hash": "provider-fingerprint",
             "credential_id": "provider-credential-id",
+            "access_key_id": "provider-access-key-id",
+            "passphrase_hash": "provider-passphrase-fingerprint",
+            "service_credentials_id": "provider-service-credential-id",
             "account_id": "account-id",
         }
 
