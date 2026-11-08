@@ -210,6 +210,54 @@ class FoundationTests(unittest.TestCase):
         for secret in secret_values:
             self.assert_secret_absent_from_sqlite(secret)
 
+    def test_startup_retries_interrupted_legacy_metadata_compaction(self) -> None:
+        legacy_secret = "legacy-crash-window-secret"
+        created = self.store.create_credential(
+            provider="Example",
+            name="Interrupted scrub",
+            secret="vault-only-secret",
+            threshold=None,
+            auto_protect=False,
+            provider_metadata={"key_hash": "safe-fingerprint"},
+        )
+        credential_id = created["id"]
+        self.store._db.execute("PRAGMA secure_delete=OFF")
+        with self.store._db:
+            self.store._db.execute(
+                "UPDATE credentials SET provider_metadata_json = ? WHERE id = ?",
+                (json.dumps({"api_key": legacy_secret}), credential_id),
+            )
+            self.store._db.execute(
+                "INSERT INTO maintenance_state (key, value) VALUES (?, ?)",
+                ("provider_metadata_scrub_pending", "interrupted"),
+            )
+        with self.store._db:
+            self.store._db.execute(
+                "UPDATE credentials SET provider_metadata_json = ? WHERE id = ?",
+                (json.dumps({"key_hash": "safe-fingerprint"}), credential_id),
+            )
+        sqlite_paths = (self.path, Path(f"{self.path}-wal"))
+        self.assertTrue(
+            any(
+                path.exists() and legacy_secret.encode() in path.read_bytes()
+                for path in sqlite_paths
+            )
+        )
+
+        self.store.close()
+        self.store = Store(self.path, self.vault)
+
+        marker = self.store._db.execute(
+            "SELECT 1 FROM maintenance_state WHERE key = ?",
+            ("provider_metadata_scrub_pending",),
+        ).fetchone()
+        self.assertIsNone(marker)
+        self.assertEqual(
+            {"key_hash": "safe-fingerprint"},
+            self.store.get_credential(credential_id)["provider_metadata"],
+        )
+        self.assert_secret_absent_from_sqlite(legacy_secret)
+
     def test_failed_vault_write_cleans_possible_secret_before_dropping_record(
         self,
     ) -> None:

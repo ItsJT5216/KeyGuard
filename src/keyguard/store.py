@@ -216,6 +216,14 @@ class Store:
                 )
                 """
             )
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS maintenance_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
             default_topic = f"keyguard-{secrets.token_urlsafe(18)}"
             self._db.execute(
                 """
@@ -227,7 +235,14 @@ class Store:
             )
 
     def _scrub_legacy_provider_metadata(self) -> None:
+        marker_key = "provider_metadata_scrub_pending"
         self._db.execute("PRAGMA secure_delete=ON")
+        cleanup_pending = (
+            self._db.execute(
+                "SELECT 1 FROM maintenance_state WHERE key = ?", (marker_key,)
+            ).fetchone()
+            is not None
+        )
         rows = self._db.execute(
             "SELECT id, provider_metadata_json FROM credentials"
         ).fetchall()
@@ -238,18 +253,27 @@ class Store:
                 cleaned, changed = scrub_secret_metadata_fields(metadata)
                 if not changed:
                     continue
+                if not cleanup_pending:
+                    self._db.execute(
+                        "INSERT OR REPLACE INTO maintenance_state (key, value) "
+                        "VALUES (?, ?)",
+                        (marker_key, utc_now()),
+                    )
+                    cleanup_pending = True
                 self._db.execute(
                     "UPDATE credentials SET provider_metadata_json = ? WHERE id = ?",
                     (json.dumps(cleaned, separators=(",", ":")), row["id"]),
                 )
                 scrubbed_ids.append(row["id"])
-        if not scrubbed_ids:
+        if not cleanup_pending:
             return
 
         # Rebuild the database and truncate its WAL so rejected legacy secret
         # values are removed from SQLite storage, not merely hidden from GETs.
         self._db.execute("VACUUM")
         self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        with self._db:
+            self._db.execute("DELETE FROM maintenance_state WHERE key = ?", (marker_key,))
         for credential_id in scrubbed_ids:
             LOGGER.warning(
                 "Removed secret-bearing legacy provider metadata for %s",
